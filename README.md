@@ -1,8 +1,10 @@
-# 商剪工坊 · CutFlow Studio v0.1
+# 商剪工坊 · CutFlow Studio v0.2
 
 为口播、课程、访谈搭建的本地素材接收、GPU 同步、基础剪辑、审片与企业微信内部群交付系统。第一版是可运行研发原型，尚未达到无人值守商用精剪验收标准。
 
 ## 先用起来
+
+**新增抖音网页登录采集：** 双击 `启动抖音采集.cmd`，在独立 Chrome 中登录，再在工作台「关键词采集」管理任务。首批关键词为汽车托管、汽车租赁沙龙、AI沙龙。下载成功的素材先保存在本机，双击 `采用采集素材.cmd` 记录授权依据后进入素材投递箱。详细步骤与当前验证边界见 [采集使用说明](docs/browser-collection.md)。真实抖音登录与下载尚待实测，普通网页可看不保证可下载。
 
 1. 双击本目录 **连接GPU工作台.cmd**。连接器会自动同步素材并打开远端工作台的本机加密转发入口。请保留连接器窗口运行。
 2. 把一段 MP4 / MOV 等视频放进你指定的目录：
@@ -45,7 +47,7 @@
 | 商用画质与内容 | 等待真实素材样片验收；合成测试不能替代 |
 | 私有站点 | https://cutflow-studio-matrix-1102.snappydhole1.chatgpt.site ，页面入口已发布，素材处理仍由用户 GPU 承担 |
 
-最终实机验收：本机与 GPU 各通过 **64 项测试**。测试视频通过 SFTP 自动投递并触发远端任务，实际编码器为 **h264_nvenc**，8.0 秒输入输出 5.533333 秒，1280×720，完整解码与声画时长检查通过，重复扫描未创建重复任务，原文件未修改。该样片为测试图案和声音，不包含真实口播内容。详见 [验收记录](docs/acceptance.json)。
+v0.1 实机验收：本机与 GPU 各通过 **64 项测试**。测试视频通过 SFTP 自动投递并触发远端任务，实际编码器为 **h264_nvenc**，8.0 秒输入输出 5.533333 秒，1280×720，完整解码与声画时长检查通过，重复扫描未创建重复任务，原文件未修改。该样片为测试图案和声音，不包含真实口播内容。详见 [验收记录](docs/acceptance.json)。
 
 ## 配置与自动化
 
@@ -55,10 +57,10 @@
 
 **连接GPU工作台.cmd** 已经实现本机同步 + SSH 转发，远端观察器和渲染服务由独立守护程序管理。它不是 Windows 开机服务；本机重启后需要再次启动。GPU 实例重启后需要重新启动远端守护程序，当前尚未修改容器的启动配置。
 
-当前远端版本目录为 `/root/autodl-tmp/cutflow-studio/releases/v0.1-9e5ff062`，独立 Python 位于 `/root/autodl-tmp/cutflow-studio/runtime/bin/python`。实例重启后可在远端运行：
+当前远端版本目录为 `/root/autodl-tmp/cutflow-studio/releases/v0.2-20261102-browser`，独立 Python 位于 `/root/autodl-tmp/cutflow-studio/runtime/bin/python`。实例重启后可在远端运行：
 
 ```sh
-nohup /root/autodl-tmp/cutflow-studio/runtime/bin/python /root/autodl-tmp/cutflow-studio/releases/v0.1-9e5ff062/scripts/run_gpu.py > /root/autodl-tmp/cutflow-studio/data/supervisor.log 2>&1 < /dev/null &
+nohup /root/autodl-tmp/cutflow-studio/runtime/bin/python /root/autodl-tmp/cutflow-studio/releases/v0.2-20261102-browser/scripts/run_gpu.py > /root/autodl-tmp/cutflow-studio/data/supervisor.log 2>&1 < /dev/null &
 ```
 
 该入口自动读取已有访问令牌；不需要把令牌放入命令行。远端运行数据在 `/root/autodl-tmp/cutflow-studio/data`，原始同步素材在 `inbox`，成片在 `data/renders`。系统盘没有安装新模型，依赖和缓存都放在数据盘。
@@ -102,3 +104,7 @@ node --check web/app.js
 自动测试覆盖实际 FFmpeg 渲染、字幕重排、时长与声画延迟、纯静音、非法路径、原片保护、重启恢复、API 鉴权、同步去重、模拟企微调用与未知发送处理。测试素材为合成信号，不是真实商业样片。浏览器自动化本轮因工具无法确定 Chrome 网址而停止，完整浏览器交互及视觉检查未完成；已检查页面 HTTP 服务与脚本语法。
 
 GitHub 连接已验证，但尚未选择本项目的目标仓库。源码先保存到本地 Git；没有把代码推入其他现有仓库。HeyGen 作为后续配音或素材生成适配点，本次未进行付费生成。
+
+## v0.2 采集交付验收
+
+本机和 GPU 各通过 123 项测试，新版服务已部署，三个关键词任务已建立（每 6 小时、每次最多 5 条）。采集页面已发布到既有私有站点。当前状态是等待本机采集器及首次人工登录；没有伪造采集结果，真实抖音下载尚未完成验收。来源与授权侧车目前保存在本机；既有同步程序只同步支持的媒体与字幕，不会同步授权 JSON。验收记录见 [采集验收](docs/collection-acceptance.json)。

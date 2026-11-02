@@ -17,7 +17,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 from studio.sync import SFTPTransport, stable_hash
 
-ROOT_FILES = {"README.md", "requirements.txt", "pyproject.toml", ".env.example", "config/preset.json"}
+ROOT_FILES = {"README.md", "requirements.txt", "requirements-browser.txt", "pyproject.toml", ".env.example", "config/preset.json"}
 SOURCE_RULES = {
     "studio": {".py"}, "tests": {".py"}, "scripts": {".py", ".sh", ".ps1", ".cmd"},
     "web": {".html", ".css", ".js", ".svg", ".png", ".jpg", ".webp", ".woff2"},

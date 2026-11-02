@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .store import StateConflict, Store
+from .collection_service import register_collection_routes
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts"}
@@ -210,9 +211,13 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     async def lifespan(app):
         if start_worker:
             worker.start()
-        yield
-        if start_worker:
-            worker.stop()
+            collection_worker.start()
+        try:
+            yield
+        finally:
+            if start_worker:
+                collection_worker.stop()
+                worker.stop()
 
     app = FastAPI(title="CutFlow Studio", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
@@ -223,7 +228,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         if "*" in origins:
             raise ValueError("CUTFLOW_ALLOWED_ORIGINS must use exact HTTPS/localhost origins, never *")
         app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False,
-                           allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type", "Idempotency-Key"])
+                           allow_methods=["GET", "POST", "PATCH"], allow_headers=["Authorization", "Content-Type", "Idempotency-Key"])
 
     @app.middleware("http")
     async def response_headers(request: Request, call_next):
@@ -243,6 +248,8 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
             supplied = request.query_params.get("token", "")
         if not supplied or not hmac.compare_digest(supplied.encode(), token_value.encode()):
             raise HTTPException(401, "需要有效的本机访问口令", headers={"WWW-Authenticate": "Bearer"})
+
+    collection_worker = register_collection_routes(app, authorize, inbox_path, data)
 
     def get_job(job_id: str):
         job = store.get(job_id)

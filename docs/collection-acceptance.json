@@ -1,0 +1,53 @@
+{
+  "version": "0.2.0",
+  "tasks": [
+    {
+      "id": "9a1874138fbd4c7499c39232f261a15a",
+      "keyword": "AI沙龙",
+      "provider": "browser",
+      "enabled": true,
+      "interval_seconds": 21600,
+      "max_items": 5
+    },
+    {
+      "id": "4c4e9826f6514c13914b2cddf53a78fd",
+      "keyword": "汽车租赁沙龙",
+      "provider": "browser",
+      "enabled": true,
+      "interval_seconds": 21600,
+      "max_items": 5
+    },
+    {
+      "id": "27735e3adc0b4847b72914191a6e4406",
+      "keyword": "汽车托管",
+      "provider": "browser",
+      "enabled": true,
+      "interval_seconds": 21600,
+      "max_items": 5
+    }
+  ],
+  "browser": {
+    "status": "local_agent_required",
+    "busy": false,
+    "last_seen_at": null
+  },
+  "jobs": {
+    "review": 2
+  },
+  "worker_running": true,
+  "gpu": {
+    "available": true,
+    "name": "NVIDIA GeForce RTX 4090 D",
+    "memory_mb": 24564
+  },
+  "local_tests_passed": 123,
+  "gpu_tests_passed": 123,
+  "gpu_release": "/root/autodl-tmp/cutflow-studio/releases/v0.2-20261102-browser",
+  "source_archive_sha256": "6d58bc9555c3041971075602e1f964e0d4b8c8c605d157b73cc17246a534f91d",
+  "site_url": "https://cutflow-studio-matrix-1102.snappydhole1.chatgpt.site",
+  "site_commit": "42c61b669105122d420b0e91f8c65639ceccb465",
+  "site_deployment": "appgdep_6ae8a82e33108191b88b59bee293d422",
+  "real_douyin_download_verified": false,
+  "browser_qa": "Chrome control stopped: current URL could not be verified",
+  "wecom_sent": false
+}
