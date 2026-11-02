@@ -1,0 +1,104 @@
+# 商剪工坊 · CutFlow Studio v0.1
+
+为口播、课程、访谈搭建的本地素材接收、GPU 同步、基础剪辑、审片与企业微信内部群交付系统。第一版是可运行研发原型，尚未达到无人值守商用精剪验收标准。
+
+## 先用起来
+
+1. 双击本目录 **连接GPU工作台.cmd**。连接器会自动同步素材并打开远端工作台的本机加密转发入口。请保留连接器窗口运行。
+2. 把一段 MP4 / MOV 等视频放进你指定的目录：
+
+   `C:\Users\Administrator\Desktop\空间同步\BaiduSyncdisk\公司材料空间\视频素材`
+
+3. 文件连续稳定至少 15 秒后，会自动生成剪辑任务。也可以在页面「素材库」手动选择素材。
+4. 在「剪辑与审核」观看成片、查看检查报告。技术检查通过的成片才能审核和推送。
+5. 首次接企业微信时，双击 **配置GPU企业微信.cmd**。在本机隐藏输入群机器人的 Webhook，不要发到聊天里。配置经 SSH 写入远端私有运行目录，权限为 0600，不在本机保存，不发送测试消息。刷新工作台后可审核并推送。
+
+当前本机访问 GPU 的地址是 `http://127.0.0.1:8766`，仅在连接器运行时可用。连接使用专用密钥；服务器主机公钥在首次连接记录，此后严格匹配。密钥只允许 SFTP 和远端 `127.0.0.1:8765` 的端口转发，不能运行远端 shell 命令。按 Ctrl+C 关闭本机连接器，不会关闭租用的 GPU 实例。
+
+本次交付时，本机连接器已在后台运行。双击 **连接GPU工作台.cmd** 会复用现有连接并打开带权限的页面；双击 **停止本机同步.cmd** 可以停止本项目的本机同步与转发。它不会关闭 GPU 实例或删除素材。
+
+**启动工作台.cmd** 是独立的本地 CPU 备用模式，运行在 8765 端口；不要与 GPU 流程同时启用自动发布。本机依赖已准备。换电脑时需要 Python 3.10+、FFmpeg 和 `python -m pip install -r requirements.txt`，并重新配置专用连接密钥。
+
+## 当前已实现
+
+- 原文件不修改；持续监测、稳定等待、内容哈希与任务去重。
+- SFTP 同步到指定 GPU 数据盘：临时文件、远端校验、原子落盘、失败重试。需要配置 SSH 密钥和已核验的主机指纹。
+- 长静音保守修剪，保留讲话原速；明确记录每段原片与成片时间；等比适配画幅，避免随意裁掉人物。
+- H.264/AAC 渲染、音量整理、完整解码与时长检查；保留计划、检查报告与任务事件。
+- 已有 SRT 的时间轴重排。另有可选的离线语音转写命令，但没有下载模型，也没有验证真实 GPU 推理。
+- 企业微信内部群的 MP4 文件上传与发送接口；限流、已发送去重、结果不确定时停止自动重发。
+- 中文工作台、持久任务队列、异常恢复、鉴权、明确的失败状态。
+
+**尚未实现或未验证：** 语义选段、口误与重复句可靠删除、说话人识别、自动补镜头、成片字幕烧录、品牌包装、真实 ASR 模型推理、真实企业微信投递、开机自动启动服务、长期无人值守运行。现有静音修剪不能判断内容是否讲清楚。声画元数据与解码通过，也不等于审美和商业内容质量通过。
+
+## 本次接入状态
+
+| 项目 | 状态 |
+| --- | --- |
+| 用户素材目录 | 已确认存在，本次检查为空 |
+| 本地服务、目录观察器、基本剪辑 | 已运行验证 |
+| 远程入口 | `ssh -p 10893 root@connect.westb.seetacloud.com` |
+| SSH 网络 | 已认证；专用 SFTP 与工作台转发密钥已验证 |
+| GPU 环境 | 已实测 RTX 4090 D，24564 MiB 显存，驱动 580.76.05 |
+| 远程部署 | 已部署到数据盘；Python 3.10.8 独立环境，FFmpeg 4.4.2；最终验收见 docs/acceptance.json |
+| 企业微信 | 已选择内部群机器人，尚未配置 Webhook、尚未真实发送 |
+| 商用画质与内容 | 等待真实素材样片验收；合成测试不能替代 |
+| 私有站点 | https://cutflow-studio-matrix-1102.snappydhole1.chatgpt.site ，页面入口已发布，素材处理仍由用户 GPU 承担 |
+
+最终实机验收：本机与 GPU 各通过 **64 项测试**。测试视频通过 SFTP 自动投递并触发远端任务，实际编码器为 **h264_nvenc**，8.0 秒输入输出 5.533333 秒，1280×720，完整解码与声画时长检查通过，重复扫描未创建重复任务，原文件未修改。该样片为测试图案和声音，不包含真实口播内容。详见 [验收记录](docs/acceptance.json)。
+
+## 配置与自动化
+
+`config/local.json` 保存本机非敏感连接参数，`config/preset.json` 保存剪辑参数。改变设置后重启启动器。环境变量优先于本机配置。工作台访问令牌首次启动生成在 `data/access-token.txt`，只用于本机控制台，已排除出 Git、GPU 源码包与发布包。
+
+默认自动处理素材，但手动审片和发送。完成固定栏目与模板的真实验收后，可在本地设置 `CUTFLOW_AUTO_PUBLISH=1`，并配置机器人且启用 `CUTFLOW_PUBLISH_ENABLED=1`。观察器只会自动发布自己创建、技术检查通过的任务；此模式不会额外理解语义或替你完成内容审核。**当前两项发布开关均为 0，没有自动对外发送。**
+
+**连接GPU工作台.cmd** 已经实现本机同步 + SSH 转发，远端观察器和渲染服务由独立守护程序管理。它不是 Windows 开机服务；本机重启后需要再次启动。GPU 实例重启后需要重新启动远端守护程序，当前尚未修改容器的启动配置。
+
+当前远端版本目录为 `/root/autodl-tmp/cutflow-studio/releases/v0.1-9e5ff062`，独立 Python 位于 `/root/autodl-tmp/cutflow-studio/runtime/bin/python`。实例重启后可在远端运行：
+
+```sh
+nohup /root/autodl-tmp/cutflow-studio/runtime/bin/python /root/autodl-tmp/cutflow-studio/releases/v0.1-9e5ff062/scripts/run_gpu.py > /root/autodl-tmp/cutflow-studio/data/supervisor.log 2>&1 < /dev/null &
+```
+
+该入口自动读取已有访问令牌；不需要把令牌放入命令行。远端运行数据在 `/root/autodl-tmp/cutflow-studio/data`，原始同步素材在 `inbox`，成片在 `data/renders`。系统盘没有安装新模型，依赖和缓存都放在数据盘。
+
+## 远程 GPU 部署
+
+项目默认目录为 `/root/autodl-tmp/cutflow-studio`。用户截图显示系统盘使用接近 90%，数据盘较空；实际部署前仍需运行 `scripts/doctor.py` 核实。
+
+以下步骤用于换机或重新部署。当前服务器的首次连接、密钥配置与源码部署已经完成。
+
+1. 首次 SSH 连接时核对服务器身份，配置专用 SSH 私钥，私钥只保存在本机。不要把密钥内容写进源码。
+2. 配置环境变量 `CUTFLOW_SSH_HOST`、`CUTFLOW_SSH_PORT`、`CUTFLOW_SSH_USER`、`CUTFLOW_SSH_KEY`、`CUTFLOW_SSH_KNOWN_HOSTS`。前 3 项已记录在 `config/local.json`；单独运行命令时请加载这些配置或设环境变量。
+3. 使用 `python scripts/deploy_gpu.py --dry-run` 查看源码包内容；使用 `--upload` 上传。此脚本不覆盖运行中的项目，也不自动远程执行。
+4. 在 GPU 数据盘解包到新目录，运行 `bash scripts/remote-install.sh`。按输出启动服务和 `python -m studio.watch --settings config/preset.json`，二者需要相同的 `CUTFLOW_INBOX`、`CUTFLOW_DATA`、`CUTFLOW_TOKEN`。
+5. 本机可使用 `ssh -p 10893 -L 8766:127.0.0.1:8765 root@connect.westb.seetacloud.com` 转发，浏览器访问 `http://127.0.0.1:8766`。保持远端服务只监听回环地址；该访问方式无需向公网开放剪辑服务。
+
+详细接口和接入限制见 [集成说明](docs/integrations.md)。商业化路径和验收清单见 [研发架构](docs/architecture.md)。
+
+## 企业微信的实际限制
+
+当前群机器人通过**文件消息**发送 MP4，接收者可以下载查看。单文件限制为 **20MB**；超出时会明确阻止发送。本版尚未实现长课自动分段、私有下载链接或较小发布版转码，所以不能宣称任意长视频自动发布已经闭环。保留高质量母版，不为满足附件限制无条件压低画质。
+
+## 可选离线转写
+
+在独立环境准备 `faster-whisper` 与本地 CTranslate2 模型后，可执行：
+
+```text
+python -m studio.transcribe 素材.mp4 --model-dir 本地模型目录 --output-dir 字幕目录 --device cuda
+```
+
+模型目录必须包含所需模型文件，程序不自动下载模型。输出原片时间轴 SRT 与逐词 JSON；不是成片烧录字幕，需校对。此入口只完成模拟测试，真实 CPU/GPU 推理未验证。参考 [faster-whisper 官方项目](https://github.com/SYSTRAN/faster-whisper)。
+
+## 研发与验证
+
+```text
+python -m pytest -q
+python scripts/doctor.py
+node --check web/app.js
+```
+
+自动测试覆盖实际 FFmpeg 渲染、字幕重排、时长与声画延迟、纯静音、非法路径、原片保护、重启恢复、API 鉴权、同步去重、模拟企微调用与未知发送处理。测试素材为合成信号，不是真实商业样片。浏览器自动化本轮因工具无法确定 Chrome 网址而停止，完整浏览器交互及视觉检查未完成；已检查页面 HTTP 服务与脚本语法。
+
+GitHub 连接已验证，但尚未选择本项目的目标仓库。源码先保存到本地 Git；没有把代码推入其他现有仓库。HeyGen 作为后续配音或素材生成适配点，本次未进行付费生成。

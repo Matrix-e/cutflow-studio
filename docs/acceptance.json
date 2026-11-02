@@ -1,0 +1,97 @@
+{
+  "date": "2026-11-02",
+  "test_type": "synthetic pattern and tones; no human speech; not a commercial-quality sample",
+  "local_tests_passed": 64,
+  "gpu_tests_passed": 64,
+  "source_bytes": 3773202,
+  "source_sha256": "cc2517da0a7082dff40712c77f49b29ffbd56ed4ab00d3d903af081baabcddcd",
+  "source_unchanged": true,
+  "sync_verified": true,
+  "duplicate_sync_count": 0,
+  "auto_job_count": 1,
+  "job_id": "6a494f24279843ec8461ff14d459575c",
+  "job_status": "review",
+  "source_seconds": 8.0,
+  "output_seconds": 5.533333,
+  "encoder": "h264_nvenc",
+  "gpu": {
+    "available": true,
+    "name": "NVIDIA GeForce RTX 4090 D",
+    "memory_mb": 24564
+  },
+  "qc": {
+    "passed": true,
+    "checks": [
+      {
+        "name": "duration",
+        "passed": true,
+        "expected": 5.533333,
+        "actual": 5.533333,
+        "tolerance": 0.08
+      },
+      {
+        "name": "dimensions",
+        "passed": true,
+        "actual": [
+          1280,
+          720
+        ]
+      },
+      {
+        "name": "delivery_format",
+        "passed": true
+      },
+      {
+        "name": "audio_presence",
+        "passed": true
+      },
+      {
+        "name": "audio_format",
+        "passed": true
+      },
+      {
+        "name": "audio_video_duration",
+        "passed": true,
+        "audio": 5.533,
+        "video": 5.533333
+      },
+      {
+        "name": "full_decode",
+        "passed": true
+      }
+    ],
+    "warnings": [
+      "技术检查不能替代观看成片：语义、节奏、口型、画面构图和字幕准确性须人工复核。"
+    ]
+  },
+  "source_ranges": [
+    {
+      "id": "clip-0001",
+      "source_in": 0,
+      "source_out": 2.266667,
+      "source_duration": 2.266667,
+      "timeline_start": 0.0,
+      "timeline_end": 2.266667,
+      "duration": 2.266667,
+      "frames": 68,
+      "tail_padding": 0
+    },
+    {
+      "id": "clip-0002",
+      "source_in": 4.733333,
+      "source_out": 8.0,
+      "source_duration": 3.266667,
+      "timeline_start": 2.266667,
+      "timeline_end": 5.533333,
+      "duration": 3.266667,
+      "frames": 98,
+      "tail_padding": 0
+    }
+  ],
+  "output_bytes": 5098734,
+  "wecom_configured": false,
+  "messages_sent": 0,
+  "full_browser_visual_review": false,
+  "private_site": "https://cutflow-studio-matrix-1102.snappydhole1.chatgpt.site",
+  "remote_release": "/root/autodl-tmp/cutflow-studio/releases/v0.1-9e5ff062"
+}

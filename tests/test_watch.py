@@ -1,0 +1,140 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+import httpx
+from fastapi.testclient import TestClient
+
+from studio.watch import Watcher, validated_url
+from studio.server import create_app
+
+
+class WatchTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.inbox = self.root / "inbox"
+        self.inbox.mkdir()
+        self.source = self.inbox / "speech.mp4"
+        self.source.write_bytes(b"video")
+        self.calls = []
+        self.job_status = "review"
+        self.send_timeout = False
+        self.submit_timeout = False
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def handler(self, request):
+        self.calls.append((request.method,request.url.path))
+        if request.method == "POST" and request.url.path == "/api/jobs":
+            if self.submit_timeout:
+                raise httpx.ReadTimeout("redacted test")
+            return httpx.Response(201,json={"job":{"id":"job1"},"owned_by_request":True})
+        if request.url.path.endswith("/approve"):
+            self.job_status = "approved"
+        elif request.url.path.endswith("/publish"):
+            if self.send_timeout:
+                raise httpx.ReadTimeout("secret should not be logged")
+            self.job_status = "published"
+        return httpx.Response(200,json={"job":{"id":"job1","status":self.job_status,"result":{"qc":{"passed":True}}}})
+
+    def watcher(self, automatic=False):
+        client = httpx.Client(transport=httpx.MockTransport(self.handler))
+        self.addCleanup(client.close)
+        return Watcher(self.inbox,self.root / "data","http://127.0.0.1:8765","test",auto_publish=automatic,client=client)
+
+    def test_waits_for_stability_then_submits_once_across_restart(self):
+        watch = self.watcher()
+        watch.tick(now=0)
+        watch.tick(now=14)
+        self.assertEqual(self.calls,[])
+        watch.tick(now=15)
+        watch.tick(now=30)
+        self.assertEqual(self.calls,[("POST","/api/jobs")])
+        restarted = self.watcher()
+        restarted.tick(now=40)
+        restarted.tick(now=55)
+        self.assertEqual(self.calls,[("POST","/api/jobs")])
+
+    def test_changed_file_restarts_stability_and_ignores_part_files(self):
+        (self.inbox / "upload.mp4.part").write_bytes(b"partial")
+        watch = self.watcher()
+        watch.tick(now=0)
+        self.source.write_bytes(b"changed-video")
+        watch.tick(now=15)
+        self.assertEqual(self.calls,[])
+        watch.tick(now=30)
+        self.assertEqual(self.calls,[("POST","/api/jobs")])
+
+    def test_default_never_approves_or_publishes(self):
+        watch = self.watcher()
+        watch.tick(now=0)
+        watch.tick(now=15)
+        watch.tick(now=45)
+        self.assertFalse(any(path.endswith(("/approve","/publish")) for _,path in self.calls))
+
+    def test_manual_active_job_is_not_automatically_approved(self):
+        app = create_app(data_dir=self.root / "server-data",inbox=self.inbox,token="test",start_worker=False)
+        with TestClient(app) as client:
+            manual = client.post("/api/jobs",headers={"Authorization":"Bearer test"},json={"source":"speech.mp4"}).json()["job"]
+            watch = Watcher(self.inbox,self.root / "watch-data","http://127.0.0.1:8765","test",auto_publish=True,client=client)
+            watch.tick(now=0)
+            records = watch.tick(now=15)
+            self.assertEqual(records[0]["job_id"],manual["id"])
+            self.assertFalse(records[0]["owned_by_request"])
+            app.state.store.transition(manual["id"],["queued"],"review","fixture",result={"qc":{"passed":True}})
+            watch.tick(now=30)
+            self.assertEqual(app.state.store.get(manual["id"])["status"],"review")
+
+    def test_missing_ownership_proof_never_autopublishes(self):
+        calls = []
+        def legacy_handler(request):
+            calls.append((request.method,request.url.path))
+            return httpx.Response(201,json={"job":{"id":"manual-job"},"created":False})
+        with httpx.Client(transport=httpx.MockTransport(legacy_handler)) as client:
+            watch = Watcher(self.inbox,self.root / "legacy-data","http://127.0.0.1:8765","test",auto_publish=True,client=client)
+            watch.tick(now=0)
+            watch.tick(now=15)
+            watch.tick(now=30)
+        self.assertEqual(calls,[("POST","/api/jobs")])
+
+    def test_explicit_auto_publishes_only_once(self):
+        watch = self.watcher(automatic=True)
+        watch.tick(now=0)
+        watch.tick(now=15)
+        watch.tick(now=45)
+        self.assertEqual(self.calls.count(("POST","/api/jobs/job1/publish")),1)
+
+    def test_ambiguous_publish_never_retries_after_restart(self):
+        self.send_timeout = True
+        watch = self.watcher(automatic=True)
+        watch.tick(now=0)
+        watch.tick(now=15)
+        self.send_timeout = False
+        restarted = self.watcher(automatic=True)
+        restarted.tick(now=30)
+        restarted.tick(now=45)
+        self.assertEqual(self.calls.count(("POST","/api/jobs/job1/publish")),1)
+
+    def test_submission_timeout_can_retry_idempotently(self):
+        self.submit_timeout = True
+        watch = self.watcher()
+        watch.tick(now=0)
+        watch.tick(now=15)
+        watch.tick(now=20)
+        self.assertEqual(len(self.calls),1)
+        self.submit_timeout = False
+        watch.tick(now=30)
+        watch.tick(now=45)
+        self.assertEqual(len(self.calls),2)
+
+    def test_unsafe_api_urls_rejected(self):
+        for url in ("http://example.com", "http://localhost.evil", "https://user:secret@example.com", "https://example.com?token=x"):
+            with self.assertRaises(ValueError):
+                validated_url(url)
+        self.assertEqual(validated_url("https://gpu.example.com/"),"https://gpu.example.com")
+
+
+if __name__ == "__main__":
+    unittest.main()
