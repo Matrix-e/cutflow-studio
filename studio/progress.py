@@ -1,7 +1,7 @@
 """Truthful phase snapshots. Stage counts are not time-completion percentages.
 
 queue_position is one-based and includes this queued job. Durations describe the
-latest attempt, including its queue wait, and stop at completion/failure.
+latest attempt, including its queue wait, and stop at completion/failure/withdrawal.
 """
 from __future__ import annotations
 
@@ -12,13 +12,14 @@ STAGE_LABELS = {
     "queued": "排队中", "validating": "检查素材", "preparing_voice": "生成旁白",
     "animating_presenter": "制作人物口型", "planning_visuals": "编排画面",
     "compositing": "合成视频", "checking": "检查成片", "ready": "制作完成", "failed": "需要处理",
+    "withdrawn": "已撤回",
 }
 STAGE_MESSAGES = {
     "queued": "任务已加入队列", "validating": "正在分析原始素材",
     "preparing_voice": "正在按已确认讲稿生成完整旁白", "animating_presenter": "正在同步人物嘴型",
     "planning_visuals": "正在按完整旁白时长编排画面", "compositing": "正在合成画面、字幕和声音",
     "checking": "正在检查成片音画与完整解码", "ready": "成片检查通过，等待人工试看确认",
-    "failed": "剪辑失败",
+    "failed": "剪辑失败", "withdrawn": "用户撤回了尚未开始的排队任务，素材、讲稿和设置已保留",
 }
 _MESSAGE_STAGES = {message: stage for stage, message in STAGE_MESSAGES.items()}
 _MESSAGE_STAGES.update({"用户请求重新剪辑，已排队": "queued", "服务重新启动，已重新排队恢复剪辑": "queued",
@@ -62,7 +63,8 @@ def _event_stage(event):
     if event.get("message") in _MESSAGE_STAGES:
         return _MESSAGE_STAGES[event["message"]]
     status = event.get("status")
-    return ("ready" if status in _DONE_STATUSES else "queued" if status == "queued" else
+    return ("withdrawn" if status == "withdrawn" else
+            "ready" if status in _DONE_STATUSES else "queued" if status == "queued" else
             "failed" if status == "failed" else "validating" if status == "analyzing" else
             "compositing" if status == "rendering" else None)
 
@@ -105,7 +107,9 @@ def progress_snapshot(job, events, queue_position=None, current_time=None):
     explicit_last = production.get("last_stage")
     if explicit_last in ids and status != "queued":
         last_stage = explicit_last
-    if status == "queued":
+    if status == "withdrawn":
+        stage, last_stage = "withdrawn", None
+    elif status == "queued":
         stage, last_stage = "queued", None
     elif status in _DONE_STATUSES:
         stage, last_stage = "ready", "ready"
@@ -121,9 +125,10 @@ def progress_snapshot(job, events, queue_position=None, current_time=None):
         stage = last_stage or ("compositing" if status == "rendering" else "validating")
         last_stage = stage
     done = stage == "ready" or (stage == "failed" and last_stage == "ready")
-    terminal_stage = "ready" if done else "failed" if stage == "failed" else None
+    terminal_stage = "ready" if done else stage if stage in {"failed", "withdrawn"} else None
     terminal_times = [when for when, _, marker in history if marker == terminal_stage] if terminal_stage else []
-    end = (terminal_times[0] if terminal_times else _time(job.get("updated_at")) or now) if terminal_stage else now
+    terminal_fallback = (_time(production.get("withdrawn_at")) if stage == "withdrawn" else None)
+    end = (terminal_times[0] if terminal_times else terminal_fallback or _time(job.get("updated_at")) or now) if terminal_stage else now
     effective_stage = last_stage if stage == "failed" else stage
     starts, previous_stage = [], None
     for when, _, marker in history:
@@ -134,8 +139,10 @@ def progress_snapshot(job, events, queue_position=None, current_time=None):
         previous_stage = marker
     stage_start = starts[-1] if starts else attempt_start
     explicit_start = _time(production.get("stage_started_at"))
-    if stage not in {"queued", "ready", "failed"} and explicit_start and (not attempt_start or explicit_start >= attempt_start):
+    if stage not in {"queued", "ready", "failed", "withdrawn"} and explicit_start and (not attempt_start or explicit_start >= attempt_start):
         stage_start = explicit_start
+    if stage == "withdrawn":
+        stage_start = end
     completed = len(ids) if done else ids.index(effective_stage) if effective_stage in ids else 0
     stages = []
     for index, ident in enumerate(ids):
@@ -144,7 +151,9 @@ def progress_snapshot(job, events, queue_position=None, current_time=None):
         stages.append({"id": ident, "label": labels[ident], "state": state})
     position = queue_position if status == "queued" and type(queue_position) is int and queue_position >= 1 else None
     error = str(job.get("error") or "")[:1000] or None
-    if stage == "queued":
+    if stage == "withdrawn":
+        detail = "已从等待队列撤回，尚未开始这次制作。素材、讲稿和设置已保留，可继续编辑后创建新任务；不会自动重新排队。"
+    elif stage == "queued":
         detail = f"等待队列中排第 {position} 位；当前正在制作的任务完成后依次开始。" if position else "任务已排队，等待制作服务领取。"
     elif stage == "ready":
         detail = "成片已通过技术检查，请试看画面、口型、字幕和声音。"

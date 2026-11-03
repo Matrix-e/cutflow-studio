@@ -2,6 +2,7 @@
 const CREATOR_DRAFT='cutflow.creator.draft.v1';
 const creator={selected:[],uploads:new Map(),uploading:false,busy:false,resultId:null,requestId:null,requestBody:null,uncertain:false};
 const creatorFields=['creatorBrief','creatorTitle','creatorDuration','creatorAspect','creatorPace','creatorOriginalAudio','creatorMusic','creatorOpeningTitle'];
+function setDraftFieldValue(id,value){const field=$('#'+id),text=String(value??'');if(field.tagName==='SELECT'&&text&&![...field.options].some(option=>option.value===text)){const option=document.createElement('option');option.value=text;option.textContent='草稿设置：'+text;field.appendChild(option);}field.value=text;}
 function creatorInputLocked(){return creator.busy||creator.uncertain;}
 function saveCreatorDraft(){
   if(!localPage||typeof localStorage==='undefined')return;
@@ -10,7 +11,7 @@ function saveCreatorDraft(){
 function loadCreatorDraft(){
   if(!localPage||typeof localStorage==='undefined')return;
   try{const draft=JSON.parse(localStorage.getItem(CREATOR_DRAFT)||'null');if(!draft)return;
-    for(const id of creatorFields)if(typeof draft.fields?.[id]==='string')$('#'+id).value=draft.fields[id].slice(0,id==='creatorBrief'?3000:160);
+    for(const id of creatorFields)if(typeof draft.fields?.[id]==='string')setDraftFieldValue(id,draft.fields[id].slice(0,id==='creatorBrief'?3000:160));
     if(Array.isArray(draft.selected))creator.selected=[...new Set(draft.selected.filter(v=>typeof v==='string'&&v.length<=4200))].slice(0,12);
     if(typeof draft.resultId==='string'&&/^[a-zA-Z0-9_-]+$/.test(draft.resultId))creator.resultId=draft.resultId;
     if(typeof draft.requestId==='string'&&draft.requestBody&&typeof draft.requestBody==='object'&&draft.uncertain){creator.requestId=draft.requestId;creator.requestBody=draft.requestBody;creator.uncertain=true;}
@@ -103,14 +104,14 @@ async function generateCreation(){
   if(creator.busy||!state.connected||state.config.creation_supported!==true)return;
   const selected=creatorSelection();
   if(!creator.uncertain&&(!selected.length||selected.some(a=>!a.ready)||!$('#creatorBrief').value.trim())){updateCreatorAccess();return;}
-  if(!creator.uncertain){creator.requestId=crypto.randomUUID();creator.requestBody={sources:selected.map(a=>a.source),brief:$('#creatorBrief').value.trim(),title:$('#creatorTitle').value.trim(),options:creatorOptions(),idempotency_key:creator.requestId};}
+  if(!creator.uncertain){creator.requestId=crypto.randomUUID();creator.requestBody={sources:selected.map(a=>a.source),brief:$('#creatorBrief').value.trim(),title:$('#creatorTitle').value.trim(),options:creatorOptions(),idempotency_key:creator.requestId};if(typeof production!=='undefined'){if(production.parentId){creator.requestBody.parent_job_id=production.parentId;creator.requestBody.revision_kind=production.revisionKind;}if(production.referenceIds?.length)creator.requestBody.reference_ids=[...production.referenceIds];}}
   creator.busy=true;creator.uncertain=true;creatorFeedback('正在把所选素材和想法交给制作任务…');saveCreatorDraft();renderCreatorMaterials();
   try{
     const result=await api('/api/creations',{method:'POST',body:JSON.stringify(creator.requestBody)});
     if(!result.job?.id)throw Object.assign(new Error('任务结果需核实，请使用同一编号重新查看。'),{uncertain:true});
     creator.resultId=result.job.id;creator.uncertain=false;creator.requestBody=null;creator.requestId=null;
     state.jobs=[result.job,...state.jobs.filter(j=>j.id!==result.job.id)];renderJobs();renderCreatorResult();
-    creatorFeedback(result.created===false?'已找到这次提交的任务，没有重复创建。':'任务已开始制作，完成后可在下方直接查看成片。');
+    creatorFeedback(result.job.status==='withdrawn'?'已找到这次提交的任务，但它已被撤回。可在任务详情中继续编辑草稿。':result.created===false?'已找到这次提交的任务，没有重复创建。':'任务已加入制作队列，完成后可在下方直接查看成片。');
     await refresh(true);
   }catch(error){creator.uncertain=error.uncertain===true;creatorFeedback(error.message,true);}
   finally{creator.busy=false;saveCreatorDraft();renderCreatorMaterials();}

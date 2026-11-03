@@ -304,6 +304,8 @@ def public_job(job: dict, *, inbox: Path, store: Store) -> dict:
     result["video_url"] = f"/api/jobs/{job['id']}/video" if result["has_video"] else None
     result["retry_block_reason"] = retry_block_reason(job, inbox, store)
     result["can_retry"] = result["retry_block_reason"] is None
+    result["can_withdraw"] = job.get("job_kind") == "production" and job["status"] == "queued"
+    result["can_resume_draft"] = job.get("job_kind") == "production" and job["status"] == "withdrawn"
     result["preview_supported"] = True
     result['progress_detail'] = progress_snapshot(job, store.events(job['id']), store.queue_position(job['id']))
     creation = (job.get('settings') or {}).get('creation')
@@ -618,6 +620,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                 "preview_supported": True, "creation_supported": True,
                 "idea_refinement_supported": ideas_worker.supported(),
                 "knowledge_supported": True,
+                "queue_withdrawal_supported": True,
                 "face_swap": {"ready": False, "reason": "原视频换脸尚未开通：还需确认换脸与人脸识别模型的商用授权，并完成本机视频验收。现有口播可使用换人物功能。"},
                 "production": production_capabilities(scripts_worker.supported())}
 
@@ -818,7 +821,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
             raise HTTPException(400, "请求编号长度应为 1–200 个字符")
         job, created = store.create(source=source, title=body.title.strip() or path.stem, settings=body.settings,
                                     fingerprint=fingerprint, source_size=stat.st_size, source_mtime_ns=stat.st_mtime_ns,
-                                    idempotency_key=key)
+                                    idempotency_key=key, respect_withdrawn=bool(key and key.startswith('watch-')))
         worker.wake_event.set()
         return JSONResponse(status_code=201 if created else 200, content={"job": public_job(job, inbox=inbox_path, store=store), "created": created,
                             "owned_by_request": store.owned_by_request(job["id"], key)})
@@ -848,17 +851,45 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
 
     @app.get('/api/jobs/{job_id}/draft', dependencies=[Depends(authorize)])
     def work_draft(job_id: UUID):
-        job = completed_work(job_id)
+        job = get_job(job_id.hex)
+        withdrawn = job['status'] == 'withdrawn' and job['job_kind'] == 'production'
+        if not withdrawn:
+            job = completed_work(job_id)
         creation = (job.get('settings') or {}).get('creation') or {}
         if not creation:
+            if withdrawn:
+                # Older watcher jobs have raw edit settings, not a creative brief.
+                # Return the full inputs instead of silently translating a subset.
+                return {'draft_kind': 'withdrawn_legacy', 'withdrawn_job_id': job['id'],
+                        'title': job['title'], 'source': job['source'], 'settings': job['settings']}
             raise HTTPException(409, '此旧版作品没有完整制作草稿，请从素材库重新制作')
         defaults = {'mode': 'edit', 'brief': '', 'options': {}, 'spoken_script': '',
                     'voice_id': '', 'visual_fill': 'reject', 'brand': {}, 'subtype': 'salon_promo', 'presenter': None}
         draft = {key: creation.get(key, default) for key, default in defaults.items()}
         draft['options'] = {key: value for key, value in draft['options'].items() if key in CreationOptions.model_fields}
-        return {'draft': draft,
-                'sources': [entry['source'] for entry in creation.get('sources', [])],
-                'parent_job_id': job['id'], 'title': job['title']}
+        result = {'draft': draft,
+                  'sources': [entry['source'] for entry in creation.get('sources', [])],
+                  'parent_job_id': job['id'], 'title': job['title']}
+        if withdrawn:
+            # Resuming retains the original lineage. The withdrawn task is not
+            # a completed parent, and loading this draft never queues any work.
+            parent_id = creation.get('parent_job_id')
+            parent = store.get(parent_id) if parent_id else None
+            result.update(draft_kind='withdrawn', withdrawn_job_id=job['id'],
+                          parent_job_id=parent_id, parent_title=parent['title'] if parent else None,
+                          revision_kind=creation.get('revision_kind'),
+                          reference_ids=[entry['id'] for entry in creation.get('reference_works', [])])
+        return result
+
+    @app.post('/api/jobs/{job_id}/withdraw', dependencies=[Depends(authorize)])
+    def withdraw_job(job_id: UUID):
+        try:
+            job = store.withdraw_queued(job_id.hex)
+        except KeyError:
+            raise HTTPException(404, '没有找到这个制作任务') from None
+        result = public_job(job, inbox=inbox_path, store=store)
+        result['events'] = store.events(job['id'])
+        return {'job': result}
 
     @app.get("/api/jobs/{job_id}/preview", dependencies=[Depends(authorize)])
     def preview_status(job_id: str):

@@ -220,6 +220,11 @@ class Watcher:
                 if status == "published":
                     self._mark(key, "published")
                     continue
+                if status == "withdrawn":
+                    # Keep submitted so this source is not queued again, while
+                    # removing it from the bounded auto-publication candidates.
+                    self._mark(key, "blocked", "job_withdrawn")
+                    continue
                 if status == "failed":
                     self._mark(key, "blocked", "job_failed")
                     continue

@@ -39,15 +39,15 @@ function progressClockValue(clock, field) {
 function progressCardHtml(job, options = {}) {
   if (!job || job.job_kind === 'technical_test') return '';
   const active = productionProgressActive.has(job.status), failed = job.status === 'failed';
-  const done = productionProgressDone.has(job.status);
-  if (!active && !failed && !(options.review && done)) return '';
+  const done = productionProgressDone.has(job.status), withdrawn = job.status === 'withdrawn';
+  if (!active && !failed && !(options.review && (done || withdrawn))) return '';
   const detail = job.progress_detail && typeof job.progress_detail === 'object' ? job.progress_detail : {};
   const stages = Array.isArray(detail.stages) ? detail.stages.filter(step => step && typeof step.label === 'string').slice(0, 12) : [];
   const stepStates = new Set(['completed', 'active', 'failed', 'pending']);
   const completed = Number.isInteger(detail.completed_count) ? Math.max(0, Math.min(detail.completed_count, stages.length)) : null;
   const clock = progressClock(job), stale = !state.connected || clock?.frozen;
-  const label = detail.label || (failed ? '需要处理' : done ? '制作完成' : job.status === 'queued' ? '排队中' : '制作中');
-  const message = detail.detail || (failed ? '本次制作未完成，请查看详情。' : done ? '成片已完成，请试看确认。' : '正在等待制作服务返回步骤。');
+  const label = detail.label || (withdrawn ? '已撤回 · 草稿保留' : failed ? '需要处理' : done ? '制作完成' : job.status === 'queued' ? '排队中' : '制作中');
+  const message = detail.detail || (withdrawn ? '任务已退出制作队列。原设置与历史保留，继续编辑后可手动生成新任务。' : failed ? '本次制作未完成，请查看详情。' : done ? '成片已完成，请试看确认。' : '正在等待制作服务返回步骤。');
   const error = detail.error || (failed ? job.error : null);
   const queue = job.status === 'queued' && Number.isInteger(detail.queue_position) && detail.queue_position > 0 ? detail.queue_position : null;
   const steps = stages.map((step, index) => {
@@ -58,6 +58,7 @@ function progressCardHtml(job, options = {}) {
   return `<article class="production-progress-card${failed ? ' is-failed' : ''}${done ? ' is-complete' : ''}" data-progress-job="${esc(job.id)}">
     <div class="production-progress-heading"><div><span class="production-progress-state">${esc(label)}</span><h3>${esc(job.title || '视频制作任务')}</h3></div>${options.review ? '' : `<button type="button" class="button subtle" data-review="${esc(job.id)}" data-progress-review${stale ? ' disabled' : ''}>查看任务</button>`}</div>
     <p class="production-progress-description">${esc(message)}</p>
+    ${!options.review&&typeof queueDraftActionsHtml==='function'?queueDraftActionsHtml(job):''}
     <div class="production-progress-facts"><span>${done ? '制作用时' : failed ? '停止时已用' : '本次已用'} <b data-progress-clock="elapsed" data-progress-id="${esc(job.id)}">${esc(progressElapsedLabel(progressClockValue(clock, 'elapsed')))}</b></span>${active ? `<span>${job.status === 'queued' ? '已等待' : '本步骤已用'} <b data-progress-clock="stage" data-progress-id="${esc(job.id)}">${esc(progressElapsedLabel(progressClockValue(clock, 'stage')))}</b></span>` : ''}${queue ? `<span>队列第 <b>${queue}</b> 位</span>` : ''}${completed !== null && stages.length ? `<span>已完成 <b>${completed} / ${stages.length}</b> 步</span>` : ''}</div>
     ${steps ? `<ol class="production-progress-steps" aria-label="制作步骤">${steps}</ol>` : ''}
     ${error && !String(message).includes(String(error)) ? `<p class="production-progress-error">${esc(error)}</p>` : ''}

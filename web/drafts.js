@@ -150,12 +150,12 @@ const workDrafts = (() => {
     production.checking=false;production.uncertain=false;
     creator.requestId=null;creator.requestBody=null;creator.resultId=null;creator.uncertain=false;
     creator.selected=[...snapshot.creator.selected];
-    for(const [id,value] of Object.entries(snapshot.creator.fields))if(field(id))field(id).value=value;
+    for(const [id,value] of Object.entries(snapshot.creator.fields))if(field(id))setDraftFieldValue(id,value);
     const p=snapshot.production;
     for(const key of ['mode','kind','portraitId','preferredVoice','voiceExplicit','parentId','parentTitle','revisionKind'])production[key]=p[key];
     production.referenceIds=[...p.referenceIds];
     for(const [id,value] of Object.entries(p.fields))if(field(id)){
-      if(checkFields.includes(id))field(id).checked=value;else field(id).value=value;
+      if(checkFields.includes(id))field(id).checked=value;else setDraftFieldValue(id,value);
     }
     if(field('presenterConsent'))field('presenterConsent').checked=false;
     if(field('productionScriptPreview'))field('productionScriptPreview').hidden=true;

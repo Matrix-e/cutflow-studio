@@ -176,7 +176,8 @@ class Store:
 
     def create(self, *, source: str, title: str, settings: dict, fingerprint: str,
                source_size: int, source_mtime_ns: int, idempotency_key: str | None = None,
-               production: dict | None = None, allow_active_merge: bool = True):
+               production: dict | None = None, allow_active_merge: bool = True,
+               respect_withdrawn: bool = False):
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._check_diagnostic_sources(conn, source, settings)
@@ -186,6 +187,15 @@ class Store:
                     if previous["fingerprint"] != fingerprint:
                         raise StateConflict("同一请求编号已用于其他素材或剪辑设置")
                     return self.decode(previous), False
+            if respect_withdrawn:
+                # Automatic watchers must not recreate explicitly withdrawn work,
+                # including a lost response after merging into a manual request.
+                # Explicit user generation uses a new key and leaves this off.
+                withdrawn = conn.execute(
+                    "SELECT * FROM jobs WHERE fingerprint=? AND status='withdrawn' "
+                    "AND job_kind='production' ORDER BY created_at DESC LIMIT 1", (fingerprint,)).fetchone()
+                if withdrawn:
+                    return self.decode(withdrawn), False
             previous = conn.execute(
                 "SELECT * FROM jobs WHERE fingerprint=? AND status IN ('queued','analyzing','rendering') LIMIT 1",
                 (fingerprint,)).fetchone()
@@ -225,6 +235,32 @@ class Store:
             conn.execute("UPDATE jobs SET " + ",".join(k + "=?" for k in changes) + " WHERE id=?", values + [job_id])
             conn.execute("INSERT INTO events(job_id,created_at,status,message) VALUES (?,?,?,?)",
                          (job_id, timestamp, status, message))
+            return self.decode(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    def withdraw_queued(self, job_id: str):
+        """Withdraw an unclaimed production job without changing its inputs.
+
+        This competes with claim() under the same SQLite write lock. Once claim
+        wins, withdrawal cannot interrupt the worker or alter an active job.
+        """
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["job_kind"] != "production":
+                raise StateConflict("技术测试记录不能通过正式制作流程撤回")
+            if row["status"] == "withdrawn":
+                return self.decode(row)
+            if row["status"] != "queued":
+                raise StateConflict("任务已经开始制作或已结束，不能撤回；只能撤回尚未开始的排队任务")
+            timestamp = now()
+            production = json.loads(row["production"]) if row["production"] else {}
+            production.update(stage="withdrawn", withdrawn_at=timestamp)
+            conn.execute("UPDATE jobs SET status='withdrawn',updated_at=?,production=? WHERE id=?",
+                         (timestamp, json.dumps(production, ensure_ascii=False), job_id))
+            conn.execute("INSERT INTO events(job_id,created_at,status,message) VALUES (?,?,?,?)",
+                         (job_id, timestamp, "withdrawn", "用户撤回了尚未开始的排队任务，素材、讲稿和设置已保留"))
             return self.decode(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
 
     def claim(self):
