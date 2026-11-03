@@ -327,6 +327,43 @@ class LocalGatewayTests(unittest.TestCase):
         self.assertNotIn('sensitive upstream',str(raised.exception))
         self.assertIn('stage=video_stream retrying=False',' '.join(logs.output))
 
+    def test_only_portrait_import_has_eight_mib_body_limit_and_long_single_attempt(self):
+        payload = b'image-bytes' * 7000
+        self.assert_rejected_without_upstream('POST', '/api/ideas', headers=self.auth, content=payload)
+        response = self.client.post('/api/presenters/import?filename=person.png', headers={**self.auth,
+            'Content-Type': 'image/png'}, content=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.calls[-1]['body'], payload)
+        self.assertEqual(self.calls[-1]['timeout']['read'], 60)
+        self.assert_rejected_without_upstream('POST', '/api/presenters/import', headers=self.auth,
+                                             content=b'x' * (8 * 1024 * 1024 + 1))
+        self.calls.clear()
+        self.failures = [httpx.ReadError('portrait result unknown')]
+        with self.assertLogs('cutflow.local_gateway', level='WARNING'):
+            response = self.client.post('/api/presenters/import', headers=self.auth, content=b'image')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(response.json()['retryable'])
+
+    def test_media_cookie_allows_only_exact_portrait_image_get(self):
+        self.client.get('/local-session', headers=self.session_headers)
+        response = self.client.get('/api/presenters/1234/image', headers={'Sec-Fetch-Site': 'same-origin'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.calls[-1]['headers']['authorization'], 'Bearer ' + self.GPU_TOKEN)
+        for method, path in [('GET', '/api/presenters'), ('POST', '/api/presenters/import'),
+                             ('POST', '/api/presenters/1234/validate'), ('GET', '/api/presenters/1234/image/extra')]:
+            self.assert_rejected_without_upstream(method, path, headers={'Sec-Fetch-Site': 'same-origin'})
+        self.assert_rejected_without_upstream('GET', '/api/presenters/1234/image',
+                                             headers={'Sec-Fetch-Site': 'cross-site'})
+
+    def test_portrait_validation_keeps_single_write_attempt(self):
+        self.failures = [httpx.ReadTimeout('unconfirmed validation')]
+        with self.assertLogs('cutflow.local_gateway', level='WARNING'):
+            response = self.client.post('/api/presenters/1234/validate', headers=self.auth)
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]['timeout']['read'], 60)
+
     def test_static_site_and_health_never_contact_gpu_or_expose_files(self):
         self.assertIn("Local studio",self.client.get("/").text)
         health = self.client.get("/api/health")

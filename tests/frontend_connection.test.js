@@ -62,6 +62,35 @@ test('video fetch uses central failure handling',async()=>{
   assert.equal(h.app.state.toastKind,'connection');
 });
 
+test('an open progress window loads the finished video on the next refresh',async()=>{
+  const h=await setup();h.configure();h.app.state.mediaStreaming=true;
+  const job={id:'j1',title:'人物口播',status:'analyzing',has_video:false,production:{stage:'animating_presenter'}};
+  h.fetchImpl=async url=>url.endsWith('/api/jobs/j1')?result({job}):url.endsWith('/api/jobs')?result({jobs:[job]}):h.good(url);
+  await h.app.review('j1');assert.equal(h.elements.get('reviewVideo').hidden,true);
+  Object.assign(job,{status:'review',has_video:true,video_url:'/api/jobs/j1/video',production:{stage:'ready'},plan:{duration:8.8,clips:[{}]}});
+  await h.app.refresh(true);
+  assert.equal(h.elements.get('reviewDialog').open,true);
+  assert.equal(h.elements.get('reviewVideo').hidden,false);
+  assert.match(h.elements.get('reviewDetails').innerHTML,/等待审核/);
+  assert.equal(h.elements.get('reviewVideo').src,'http://127.0.0.1:8767/api/jobs/j1/video');
+  h.elements.get('reviewVideo').currentTime=4;h.calls.length=0;
+  await h.app.refresh(true);
+  assert.equal(h.elements.get('reviewVideo').currentTime,4);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/api/jobs/j1')).length,0);
+});
+
+test('closing a progress window while its completion refresh is pending does not reopen it',async()=>{
+  const h=await setup();h.configure();h.app.state.selected={id:'j1',status:'rendering',has_video:false};
+  h.elements.get('reviewDialog').showModal();const detail=pending();
+  const job={id:'j1',status:'review',has_video:true,video_url:'/api/jobs/j1/video'};
+  h.fetchImpl=url=>url.endsWith('/api/jobs/j1')?detail.promise:Promise.resolve(url.endsWith('/api/jobs')?result({jobs:[job]}):h.good(url));
+  const updating=h.app.refresh(true);await tick();
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/api/jobs/j1')).length,1);
+  h.elements.get('reviewDialog').close();detail.resolve(result({job}));await updating;
+  assert.equal(h.elements.get('reviewDialog').open,false);
+  assert.equal(h.app.state.selected,null);assert.equal(h.app.state.videoSource,null);
+});
+
 test('business 409 does not disconnect and successful refresh does not clear business toast',async()=>{
   const h=await setup();h.configure();h.fetchImpl=async()=>result({detail:'当前任务状态不能审核'},409);
   try{await h.app.api('/api/jobs/j1/approve',{method:'POST'});}catch(error){h.app.reportError(error);}

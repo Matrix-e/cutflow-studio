@@ -1,0 +1,12 @@
+# Isolated GPU runtime; verified with the host's torch 2.1.2+cu121 build.
+# do not install this file into the web API or Qwen TTS environment.
+# No TensorFlow, OpenMMLab, InsightFace, S3FD, or BiSeNet is used.
+diffusers==0.32.2
+transformers==4.49.0
+accelerate==1.4.0
+huggingface_hub==0.30.2
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
+pillow==11.1.0
+soundfile==0.13.1
+safetensors==0.8.0

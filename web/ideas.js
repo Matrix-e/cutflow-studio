@@ -1,7 +1,7 @@
 'use strict';
 const IDEA_DRAFT='cutflow.idea.draft.v1';
 const ideaAssistant={id:null,requestBody:null,job:null,pending:false,checking:false,uncertain:false,pollTimer:null,undoText:null,appliedText:null,revision:0,snapshot:null,editedText:'',sequence:0};
-function ideaContext(){return JSON.stringify({brief:$('#creatorBrief').value,selected:creator.selected,options:creatorOptions()});}
+function ideaContext(){return JSON.stringify({brief:$('#creatorBrief').value,selected:creator.selected,options:creatorOptions(),mode:typeof productionMode==='function'?productionMode():'edit'});}
 function ideaMatches(){return ideaAssistant.snapshot?.revision===ideaAssistant.revision&&ideaAssistant.snapshot?.context===ideaContext();}
 function ideaResultValid(result){return result&&typeof result.expanded_brief==='string'&&result.expanded_brief.trim().length>20&&result.expanded_brief.length<=2400&&typeof result.production_brief==='string'&&result.production_brief.trim().length>0&&result.production_brief.length<=500&&Array.isArray(result.assumptions)&&result.assumptions.length<=15&&result.assumptions.every(x=>typeof x==='string'&&x.length<=600);}
 function saveIdeaDraft(){
@@ -111,7 +111,7 @@ function applyIdeaRefinement(){
   if(creatorInputLocked()||!state.connected||ideaAssistant.job?.status!=='succeeded'||!ideaMatches()||!ideaResultValid(result))return;
   const edited=$('#ideaEditor').value.trim();
   if(!edited||edited.length>2400||edited.includes('【剪辑执行要求】')){ideaMessage('请将创意方案控制在 2400 字内；剪辑执行要求会单独附在末尾。',true);return;}
-  const next=edited+'\n\n【剪辑执行要求】\n'+result.production_brief;
+  const next=typeof productionMode==='function'&&productionMode()!=='edit'?edited:edited+'\n\n【剪辑执行要求】\n'+result.production_brief;
   if(next.length>3000){ideaMessage('方案过长，原想法已保留，请缩短后再采用。',true);return;}
   ideaAssistant.undoText=$('#creatorBrief').value;ideaAssistant.appliedText=next;ideaAssistant.editedText=edited;
   $('#creatorBrief').value=next;ideaAssistant.revision++;

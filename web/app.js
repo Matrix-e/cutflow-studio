@@ -61,7 +61,7 @@ async function api(path,options={},format='json',context=connectionContext()){
   const method=(options.method||'GET').toUpperCase();
   const readOnly=['GET','HEAD'].includes(method),outdated=()=>readOnly?staleRequest():uncertainRequest();
   if(!readOnly&&!state.connected)throw Object.assign(new Error('连接尚未恢复，请先检查任务状态后再操作。'),{connectivity:true});
-  const controller=new AbortController(),request={controller,readOnly};state.requests.add(request);const timeout=setTimeout(()=>controller.abort(),path.endsWith('/publish')?300000:format==='blob'?120000:20000);
+    const controller=new AbortController(),request={controller,readOnly};state.requests.add(request);const timeout=setTimeout(()=>controller.abort(),path.endsWith('/publish')?300000:format==='blob'?120000:path.startsWith('/api/presenters/import?')?60000:20000);
   try{
     const response=await fetch(context.base+path,{...options,headers:{Authorization:'Bearer '+context.token,...(options.body?{'Content-Type':'application/json'}:{}),...options.headers},cache:'no-store',signal:controller.signal});
     if(!currentContext(context))throw outdated();
@@ -87,6 +87,7 @@ function refresh(silent=false){
   const flight={context:connectionContext(),promise:null};state.refreshing=flight;
   flight.promise=(async()=>{
     let context=flight.context;
+    const reviewRevision=state.reviewRequest;
     try{
       if(!state.connected)setConnection(false,'正在检查服务连接，已有数据暂不更新。','checking');
       if(state.reauthNeeded){state.reauthNeeded=false;state.reauthAttempted=true;await readLocalSession(context);context=connectionContext();flight.context=context;}
@@ -95,6 +96,10 @@ function refresh(silent=false){
       if(typeof status?.worker_running!=='boolean'||typeof status?.execution_target!=='string'||!Array.isArray(assets?.assets)||!Array.isArray(jobs?.jobs)||typeof config?.inbox!=='string'||!assets.assets.every(a=>a&&typeof a.source==='string')||!jobs.jobs.every(j=>j&&typeof j.id==='string'&&typeof j.status==='string'))throw Object.assign(new Error('服务返回的数据不完整，等待重新检查。'),{connectivity:true});
       state.assets=assets.assets;state.jobs=jobs.jobs.filter(j=>!isTechnicalTest(j));state.technicalTestCount=Number.isInteger(status.technical_test_count)&&status.technical_test_count>=0?status.technical_test_count:0;state.config=config;state.executionTarget=status.execution_target;state.lastCheckAt=Date.now();state.lastSuccessAt=state.lastCheckAt;state.reauthAttempted=false;
       const latest=state.selected&&state.jobs.find(j=>j.id===state.selected.id);
+      const refreshOpenReview=latest&&$('#reviewDialog').open&&reviewRevision===state.reviewRequest&&(
+        latest.status!==state.selected.status||latest.has_video!==state.selected.has_video||
+        latest.production?.stage!==state.selected.production?.stage||latest.updated_at!==state.selected.updated_at||
+        latest.has_video&&!state.videoSource);
       if(latest)state.selected={...state.selected,...latest};
       else if(state.selected&&!isTechnicalTest(state.selected)){state.reviewRequest++;state.selected=null;$('#reviewDialog').close();updateReviewActions();toast('任务列表已更新，请重新打开记录查看。');}
       setConnection(true,config.auto_publish?'自动发布已启用；质量检查通过的任务将按配置推送。':'素材已读取。新建剪辑后，成片会进入审核区，原始素材保持完整。');
@@ -105,6 +110,7 @@ function refresh(silent=false){
       $('#serviceState').textContent=status.worker_running?(status.execution_target==='remote_gpu'?'远端 GPU 服务运行中':'本地服务运行中'):'工作线程未运行';$('#gpuState').textContent=status.gpu?.available?(status.gpu.name+' · '+Math.round(status.gpu.memory_mb/1024)+' GB'):'当前服务未检测到 GPU';
       $('#wecomState').textContent=status.delivery?.configured?(status.delivery.enabled?'已配置并启用':'已配置 · 尚未启用'):'待配置机器人';
       $('#remoteInboxPath').textContent=config.inbox;if(!state.localGateway)$('#inboxPath').textContent='当前连接远程素材库。请在这台电脑打开本地工作台，即可直接选择视频导入。';renderAssets();renderJobs();if(state.filter==='technical_test')refreshTechnicalTests(true);if(typeof refreshCollections==='function'&&$('#page-collections').classList.contains('active'))refreshCollections(true);
+      if(refreshOpenReview&&$('#reviewDialog').open&&state.selected?.id===latest.id)await review(latest.id);
     }catch(error){if(currentContext(context))connectionFailure(context,error);if(!silent)reportError(error);}
   })().finally(()=>{if(state.refreshing===flight)state.refreshing=null;});
   return flight.promise;

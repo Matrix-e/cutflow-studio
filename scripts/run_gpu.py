@@ -33,6 +33,18 @@ def main():
     if idea_python.is_file() and idea_model.is_dir():
         env.setdefault('CUTFLOW_IDEA_PYTHON', str(idea_python))
         env.setdefault('CUTFLOW_IDEA_MODEL_DIR', str(idea_model))
+    tts_python = base/'tts-runtime/bin/python'
+    tts_model = base/'models/Qwen3-TTS-12Hz-1.7B-CustomVoice'
+    if tts_python.is_file() and tts_model.is_dir():
+        env.setdefault('CUTFLOW_TTS_PYTHON', str(tts_python))
+        env.setdefault('CUTFLOW_TTS_MODEL_DIR', str(tts_model))
+    presenter_python = base/'presenter-runtime/bin/python'
+    presenter_model = base/'models/presenter'
+    if presenter_python.is_file() and presenter_model.is_dir():
+        env.setdefault('CUTFLOW_PRESENTER_PYTHON', str(presenter_python))
+        env.setdefault('CUTFLOW_PRESENTER_MODEL_DIR', str(presenter_model))
+    env.setdefault('HF_HOME', str(base/'cache/hf'))
+    env.setdefault('TMPDIR', str(base/'tmp'))
     commands = {
         'server':[sys.executable,'-m','uvicorn','studio.server:app','--host','127.0.0.1','--port','8765','--no-access-log'],
         'watcher':[sys.executable,'-m','studio.watch'],

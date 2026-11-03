@@ -29,13 +29,16 @@ ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM = 'http://127.0.0.1:8766'
 PORT = 8767
 MAX_REQUEST_BYTES = 65536
+MAX_PORTRAIT_BYTES = 8 * 1024 * 1024
 RESPONSE_HEADERS = {'content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range'}
 LOGGER = logging.getLogger('cutflow.local_gateway')
 API_TIMEOUT = httpx.Timeout(8, connect=3, pool=3)
 VIDEO_TIMEOUT = httpx.Timeout(300, connect=5, pool=5)
 PUBLISH_TIMEOUT = httpx.Timeout(290, connect=5, pool=5)
+PORTRAIT_TIMEOUT = httpx.Timeout(60, connect=5, pool=5)
 ATTEMPT_DEADLINE_SECONDS = 8
 PUBLISH_DEADLINE_SECONDS = 290
+PORTRAIT_DEADLINE_SECONDS = 60
 RETRYABLE_READ_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError,
                          httpx.ReadTimeout, httpx.RemoteProtocolError)
 
@@ -45,7 +48,7 @@ def _route_label(path: str) -> str:
     # never enter the diagnostic log, including attacker-chosen unknown paths.
     fixed = {'status', 'jobs', 'assets', 'config', 'approve', 'publish', 'retry', 'video',
              'collections', 'tasks', 'items', 'runs', 'import', 'browser', 'claim',
-             'complete', 'fail', 'heartbeat'}
+             'complete', 'fail', 'heartbeat', 'presenters', 'image', 'validate', 'scripts', 'ideas'}
     return '/api/' + '/'.join(part if part in fixed else '{id}' for part in path.split('/'))
 
 
@@ -194,15 +197,18 @@ def create_app(*, gpu_token: str, local_token: str | None = None,
 
     @app.api_route('/api/{path:path}', methods=['GET', 'POST', 'PATCH'])
     async def proxy(path: str, request: Request):
-        media_get = request.method == 'GET' and (path == 'assets/video' or re.fullmatch(r'jobs/[A-Za-z0-9_-]+/video', path) is not None)
+        portrait_image = request.method == 'GET' and re.fullmatch(r'presenters/[A-Za-z0-9_-]+/image', path) is not None
+        media_get = request.method == 'GET' and (path == 'assets/video' or re.fullmatch(r'jobs/[A-Za-z0-9_-]+/video', path) is not None or portrait_image)
         cookie_authorized = media_get and hmac.compare_digest(request.cookies.get('cutflow_media', '').encode(), desktop_token.encode())
         if not authorized(request) and not cookie_authorized:
             return unauthorized()
         if not re.fullmatch(r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*', path):
             return JSONResponse({'detail': '请求路径无效。'}, status_code=400)
+        portrait_import = request.method == 'POST' and path == 'presenters/import'
+        request_limit = MAX_PORTRAIT_BYTES if portrait_import else MAX_REQUEST_BYTES
         content = bytearray()
         async for chunk in request.stream():
-            if len(content) + len(chunk) > MAX_REQUEST_BYTES:
+            if len(content) + len(chunk) > request_limit:
                 return JSONResponse({'detail': '请求内容过大。'}, status_code=413)
             content.extend(chunk)
         headers = {'Authorization': 'Bearer ' + gpu_token, 'Accept-Encoding': 'identity'}
@@ -213,8 +219,10 @@ def create_app(*, gpu_token: str, local_token: str | None = None,
         url = httpx.URL(UPSTREAM).copy_with(path='/api/' + path, query=str(httpx.QueryParams(query)).encode())
         is_video = request.method == 'GET' and path.endswith('/video')
         is_publish = request.method == 'POST' and re.fullmatch(r'jobs/[A-Za-z0-9_-]+/publish', path) is not None
-        timeout = PUBLISH_TIMEOUT if is_publish else VIDEO_TIMEOUT if is_video else API_TIMEOUT
-        deadline = PUBLISH_DEADLINE_SECONDS if is_publish else ATTEMPT_DEADLINE_SECONDS
+        portrait_validate = request.method == 'POST' and re.fullmatch(r'presenters/[A-Za-z0-9_-]+/validate', path) is not None
+        portrait_write = portrait_import or portrait_validate
+        timeout = PUBLISH_TIMEOUT if is_publish else PORTRAIT_TIMEOUT if portrait_write else VIDEO_TIMEOUT if is_video else API_TIMEOUT
+        deadline = PUBLISH_DEADLINE_SECONDS if is_publish else PORTRAIT_DEADLINE_SECONDS if portrait_write else ATTEMPT_DEADLINE_SECONDS
         attempts = 2 if request.method == 'GET' else 1
         upstream = None
 

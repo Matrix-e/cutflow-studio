@@ -1,0 +1,9 @@
+# Install in an isolated Python 3.10 environment on the rented GPU.
+# Install the matching CUDA torch/torchaudio builds before this file.
+torch==2.6.0
+torchaudio==2.6.0
+qwen-tts==0.1.1
+# Keep the optional upstream demo dependency compatible with Transformers 4.57.
+gradio==5.49.1
+# Full offline model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice,
+# including its speech_tokenizer subdirectory.

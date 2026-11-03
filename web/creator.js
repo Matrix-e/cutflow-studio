@@ -47,6 +47,7 @@ function updateCreatorAccess(){
   $('#creatorGenerate').textContent=creator.busy?'正在提交制作任务…':creator.uncertain?'核对并继续提交':creator.resultId?'按当前想法再做一版 →':'生成视频 →';
   $('#creatorReadiness').textContent=creator.busy?'任务只提交一次，请稍候。':!supported?'制作服务正在连接或升级，你可以先写下想法。':!state.connected?'等待制作服务连接恢复。':creator.uncertain?'上次提交结果待确认；再次点击会使用相同编号核对，不会重复创建。':!selected.length?'先选素材，再写下你的想法。':waiting?waiting+' 段素材正在等待同步，完成后即可生成。':!brief?'素材已就绪，写下你的想法就可以生成。':selected.length+' 段素材已就绪 · 生成后进入成片审核';
   if(typeof updateIdeaAccess==='function')updateIdeaAccess();
+  if(typeof updateProductionAccess==='function')updateProductionAccess();
 }
 function toggleCreatorMaterial(key,on){
   if(creatorInputLocked())return;
@@ -98,6 +99,7 @@ async function retryCreatorUpload(id){
   finally{creator.uploading=false;renderCreatorMaterials();saveCreatorDraft();}
 }
 async function generateCreation(){
+  if(typeof productionMode==='function'&&productionMode()!=='edit')return generateProduction();
   if(creator.busy||!state.connected||state.config.creation_supported!==true)return;
   const selected=creatorSelection();
   if(!creator.uncertain&&(!selected.length||selected.some(a=>!a.ready)||!$('#creatorBrief').value.trim())){updateCreatorAccess();return;}
@@ -120,8 +122,8 @@ function creationPlanHtml(job){
   return (summaryText?'<p>'+esc(summaryText)+'</p>':'')+(warnings.length?'<ul>'+warnings.map(w=>'<li>'+esc(w)+'</li>').join('')+'</ul>':'');
 }
 function renderCreatorResult(){
-  const job=state.jobs.find(j=>j.id===creator.resultId);$('#creatorResult').hidden=!job;if(!job)return;
-  $('#creatorResult').innerHTML='<strong>'+esc(statusNames[job.status]||job.status)+' · '+esc(job.title)+'</strong><p>'+esc(job.brief||'')+'</p>'+creationPlanHtml(job)+'<button class="button dark" type="button" data-review="'+esc(job.id)+'">'+(job.has_video?'查看成片':'查看制作进度')+'</button>';
+  const job=state.jobs.find(j=>j.id===creator.resultId),differentMode=job&&typeof productionMode==='function'&&(job.mode||'edit')!==productionMode();$('#creatorResult').hidden=!job||differentMode;if(!job||differentMode)return;
+  $('#creatorResult').innerHTML='<strong>'+esc(statusNames[job.status]||job.status)+' · '+esc(job.title)+'</strong><p>'+esc(job.brief||'')+'</p><details><summary>制作说明与检查记录</summary>'+creationPlanHtml(job)+'</details><button class="button dark" type="button" data-review="'+esc(job.id)+'">'+(job.has_video?'查看成片':'查看制作进度')+'</button>';
 }
 function renderCreationReview(job){
   $('#creationReviewBrief').hidden=!job.brief;

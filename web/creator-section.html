@@ -1,7 +1,21 @@
 <section class="page active" id="page-create">
-  <div class="page-heading creator-heading"><div><div class="eyebrow">CREATE YOUR VIDEO</div><h1>选好素材，说出你的想法<span>。</span></h1><p>选视频、写想法，点击生成。其他设置已经替你准备好。</p></div><span class="tag light">原素材始终保留</span></div>
+  <div class="page-heading creator-heading"><div><div class="eyebrow">CREATE YOUR VIDEO</div><h1>你的想法，成为一条好视频<span>。</span></h1><p>选择制作类型，写下想法。先看讲稿，再生成带声音的成片。</p></div><span class="tag light">原素材始终保留</span></div>
+  <div class="production-modes" role="group" aria-label="选择视频类型">
+    <button type="button" class="production-mode" data-production-mode="talking_head"><span class="production-mode-number">01 / PRESENTER</span><strong>人物口播</strong><small>选择人物形象，让人物说出你的讲稿。</small></button>
+    <button type="button" class="production-mode" data-production-mode="narrated_promo"><span class="production-mode-number">02 / VOICEOVER</span><strong>独白宣传</strong><small>选择视频素材，配上完整独白与音乐。</small></button>
+    <button type="button" class="production-mode active" data-production-mode="brand_promo"><span class="production-mode-number">03 / EVENT & BRAND</span><strong>企业／沙龙宣传</strong><small>围绕活动亮点，制作一条有吸引力的邀请。</small></button>
+  </div>
+  <div class="production-toolbar"><p id="productionModeStatus" role="status">正在检查租用 GPU 的制作能力…</p><button type="button" class="text-button production-edit" data-production-mode="edit">只剪原视频 →</button></div>
   <div class="creator-layout">
-    <section class="panel creator-materials">
+    <section class="panel production-presenter" id="productionPresenter" hidden>
+      <h2><span class="step-number">1</span> 选择人物形象</h2>
+      <p class="help">选择一张正面人像，生成嘴型同步的口播。人物身体保持静态。</p>
+      <div class="presenter-tabs"><button type="button" class="button subtle active" data-presenter-kind="public">公共数字人</button><button type="button" class="button subtle" data-presenter-kind="personal">我的形象</button></div>
+      <div id="presenterGallery" class="presenter-gallery"></div><p id="presenterEmpty" class="presenter-empty">正在读取可用形象。</p>
+      <div id="presenterUpload" hidden><label class="production-check"><input type="checkbox" id="presenterConsent">我已获得此人物制作数字人口播的授权。</label><input type="file" id="presenterFile" accept="image/png,image/jpeg" hidden><button type="button" class="button dark" id="presenterUploadButton">上传我的正面照片</button><p class="help">PNG / JPG，最大 8 MB。清晰、无遮挡的正面照片效果更稳定。</p></div>
+      <p class="help" id="presenterStatus" role="status"></p><p class="help">服装和背景随所选形象保存；生成新服装、任意换背景仍在开发中。</p>
+    </section>
+    <section class="panel creator-materials" id="productionMaterials">
       <div class="section-heading"><div><h2><span class="step-number">1</span> 选择素材</h2><p class="help">已有素材直接勾选；新视频可以一次上传多个。</p></div><span id="creatorSelectedCount" class="tag light">已选 0 段</span></div>
       <div class="creator-upload" id="creatorDropZone"><div><strong>把视频拖到这里</strong><span>支持多选 · 每段最多 2 GB</span></div><button type="button" id="creatorUploadButton" class="button primary">＋ 上传视频</button><input type="file" id="creatorFileInput" multiple accept=".mp4,.mov,.mkv,.webm,.avi,.m4v,.mts" aria-label="上传制作素材，可多选" hidden></div>
       <p id="creatorUploadStatus" class="media-status" role="status" aria-live="polite"></p>
@@ -14,11 +28,30 @@
     </section>
     <section class="panel creator-brief-panel">
       <div class="section-heading"><div><h2><span class="step-number">2</span> 说说你想做什么</h2><p class="help">用途、时长、想突出的内容，都可以写在这里。</p></div></div>
+      <label class="production-field" id="productionSubtypeField">这次做什么？<select id="productionSubtype"><option value="salon_promo">沙龙活动宣传 · 邀请参与</option><option value="salon_recap">沙龙活动回顾 · 呈现现场</option><option value="corporate">企业宣传 · 介绍价值</option></select></label>
       <div class="creator-idea-label"><label for="creatorBrief" class="creator-main-label">我对这条视频的想法</label><button type="button" class="idea-refine" id="ideaRefineButton">✦ 帮我完善想法</button></div>
       <textarea id="creatorBrief" maxlength="3000" rows="7" placeholder="例如：做一条30秒竖屏视频，按素材顺序拼接，保留原声，开头标题用“汽车托管，先看这三张清单”。"></textarea>
       <div class="idea-tools"><p id="ideaStatus" class="idea-status" role="status" aria-live="polite">一句简单想法也可以。先出完整方案，采用后才会替换原文。</p><button type="button" class="text-button idea-undo" id="ideaUndoButton" hidden>撤销采用</button></div>
       <div class="creator-examples"><span>试试这样写</span><button class="creator-chip" type="button" data-brief-example="做一条30秒竖屏视频，按素材顺序拼接，保留原声。">30 秒竖屏</button><button class="creator-chip" type="button" data-brief-example="保留完整，横屏，加一点轻音乐。">完整横屏＋轻音乐</button><button class="creator-chip" type="button" data-brief-example="把选中的素材按顺序拼接，保留原声，清理长停顿。">自然口播</button></div>
-      <p class="creator-scope">可按想法调整时长、比例、标题、停顿和音乐。当前按所选顺序制作初稿；自动挑选语义亮点、改写内容与新配音尚未接入。</p>
+      <p id="productionScope" class="creator-scope">可按想法调整时长、比例、标题、停顿和音乐。当前按所选顺序制作初稿；自动挑选语义亮点、改写内容与新配音尚未接入。</p>
+      <section class="production-script" id="productionScriptPanel">
+        <div class="section-heading"><div><h3>视频里实际说的话</h3><p class="help">可以自己写，也可以让 GPU 根据想法起草。</p></div><button type="button" class="button dark" id="productionWriteScript">✦ 按想法写讲稿</button></div>
+        <textarea id="productionScript" rows="7" maxlength="1500" aria-label="视频独白讲稿" placeholder="这里的文字会被完整朗读。活动时间、地点、报名方式可以写进讲稿，也可在下方补充。"></textarea>
+        <p id="productionScriptStatus" class="script-status" role="status" aria-live="polite"></p>
+        <div id="productionScriptPreview" class="production-result" hidden><strong>新讲稿已准备好</strong><p id="productionScriptSuggestion"></p><p id="productionScriptAssumptions" class="help"></p><button type="button" class="button dark" id="productionAdoptScript">采用这版讲稿</button></div>
+      </section>
+      <details class="creator-options production-options" id="productionOptions"><summary>更多设置 <span>已选好配音、字幕与轻音乐</span></summary>
+        <div class="form-row"><label>声音<select id="productionVoice"><option value="">正在读取可用声音…</option></select></label><label>表达语气<select id="productionStyle"><option value="professional">专业自然</option><option value="warm">亲切温暖</option><option value="energetic">轻快有活力</option></select></label></div>
+        <div class="form-row"><label>画面比例<select id="productionAspect"><option value="9:16">竖屏 9:16</option><option value="16:9">横屏 16:9</option><option value="1:1">方形 1:1</option></select></label><label>讲稿目标时长<select id="productionDuration"><option value="45">约 45 秒</option><option value="30">约 30 秒</option><option value="60">约 60 秒</option><option value="90">约 90 秒</option></select></label></div>
+        <p class="help">目标时长用于起草讲稿。成片会完整读完独白，不会为了凑时长截断声音。</p>
+        <label class="production-check"><input id="productionMusic" type="checkbox" checked>加入原创轻音乐</label>
+        <label class="production-check"><input id="productionSubtitles" type="checkbox" checked>加入中文字幕</label>
+        <label class="production-check" id="productionLoopField"><input id="productionLoop" type="checkbox">素材不足时，允许重复使用所选画面</label>
+        <label id="productionSourceAudioField">素材原声<select id="productionSourceAudio"><option value="mute">关闭，让独白更清晰</option><option value="low">降低音量，保留现场氛围</option></select></label>
+        <label>品牌／活动名称（选填）<input id="productionBrand" maxlength="120" placeholder="使用真实名称，不填则不添加"></label>
+        <div class="form-row"><label>活动时间（选填）<input id="productionDate" maxlength="80" placeholder="例如：11 月 15 日下午"></label><label>活动地点（选填）<input id="productionPlace" maxlength="160" placeholder="填写确认后的地点"></label></div>
+        <label>报名或行动方式（选填）<input id="productionCTA" maxlength="200" placeholder="例如：联系活动负责人，了解报名详情"></label>
+      </details>
       <details class="creator-options" id="creatorOptions"><summary>更多设置 <span>可不填，按想法和素材自动安排</span></summary>
         <label>作品名称（选填）<input id="creatorTitle" maxlength="160" placeholder="留空时根据想法命名"></label>
         <div class="form-row"><label>成片时长<select id="creatorDuration"><option value="">按想法 / 保留完整</option><option value="15">15 秒</option><option value="30">30 秒</option><option value="60">60 秒</option><option value="90">90 秒</option></select></label><label>画面比例<select id="creatorAspect"><option value="">按想法 / 跟随素材</option><option value="9:16">竖屏 9:16</option><option value="16:9">横屏 16:9</option><option value="1:1">方形 1:1</option><option value="original">跟随首段素材</option></select></label></div>

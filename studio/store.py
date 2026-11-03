@@ -23,7 +23,7 @@ class DiagnosticSourceConflict(StateConflict):
 
 
 class Store:
-    JSON_FIELDS = {"settings", "plan", "result", "publication"}
+    JSON_FIELDS = {"settings", "plan", "result", "publication", "production"}
 
     @staticmethod
     def source_names(source: str, settings: dict) -> set[str]:
@@ -74,6 +74,8 @@ class Store:
                 conn.execute("ALTER TABLE jobs ADD COLUMN job_kind TEXT NOT NULL DEFAULT 'production'")
             if "diagnostic_reason" not in columns:
                 conn.execute("ALTER TABLE jobs ADD COLUMN diagnostic_reason TEXT")
+            if "production" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN production TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS jobs_kind_status ON jobs(job_kind,status,created_at)")
 
     @contextmanager
@@ -168,7 +170,8 @@ class Store:
             return self.decode(conn.execute("SELECT * FROM jobs WHERE id=?",(job_id,)).fetchone())
 
     def create(self, *, source: str, title: str, settings: dict, fingerprint: str,
-               source_size: int, source_mtime_ns: int, idempotency_key: str | None = None):
+               source_size: int, source_mtime_ns: int, idempotency_key: str | None = None,
+               production: dict | None = None):
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._check_diagnostic_sources(conn, source, settings)
@@ -185,16 +188,17 @@ class Store:
                 return self.decode(previous), False
             job_id, timestamp = uuid.uuid4().hex, now()
             conn.execute("""INSERT INTO jobs
-                (id,source,title,fingerprint,idempotency_key,source_size,source_mtime_ns,settings,status,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (
+                (id,source,title,fingerprint,idempotency_key,source_size,source_mtime_ns,settings,status,created_at,updated_at,production)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 job_id, source, title, fingerprint, idempotency_key, source_size, source_mtime_ns,
-                json.dumps(settings, ensure_ascii=False), "queued", timestamp, timestamp))
+                json.dumps(settings, ensure_ascii=False), "queued", timestamp, timestamp,
+                json.dumps(production, ensure_ascii=False) if production is not None else None))
             conn.execute("INSERT INTO events(job_id,created_at,status,message) VALUES (?,?,?,?)",
                          (job_id, timestamp, "queued", "任务已加入队列"))
             return self.decode(conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()), True
 
     def transition(self, job_id: str, expected: Iterable[str], status: str, message: str, **fields: Any):
-        allowed = {"plan", "result", "output_path", "error", "publication", "progress"}
+        allowed = {"plan", "result", "output_path", "error", "publication", "progress", "production"}
         if fields.keys() - allowed:
             raise ValueError("Unsupported job fields")
         expected = tuple(expected)
@@ -234,7 +238,7 @@ class Store:
         """Re-render interrupted encodes, but never retry an uncertain external send."""
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute("SELECT id,status FROM jobs WHERE status IN ('analyzing','rendering','publishing')").fetchall()
+            rows = conn.execute("SELECT id,status,production FROM jobs WHERE status IN ('analyzing','rendering','publishing')").fetchall()
             for row in rows:
                 was_sending = row["status"] == "publishing"
                 state = "failed" if was_sending else "queued"
@@ -242,5 +246,9 @@ class Store:
                         if was_sending else "服务重新启动，已重新排队恢复剪辑")
                 conn.execute("UPDATE jobs SET status=?,updated_at=?,error=?,progress=0 WHERE id=?",
                              (state,now(),note if was_sending else None,row["id"]))
+                if row['production'] and not was_sending:
+                    production = json.loads(row['production'])
+                    production.update(stage='queued', error_code=None)
+                    conn.execute('UPDATE jobs SET production=? WHERE id=?', (json.dumps(production, ensure_ascii=False), row['id']))
                 conn.execute("INSERT INTO events(job_id,created_at,status,message) VALUES (?,?,?,?)",
                              (row["id"],now(),state,note))
