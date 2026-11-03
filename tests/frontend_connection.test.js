@@ -11,7 +11,7 @@ const result=(body,status=200)=>({ok:status>=200&&status<300,status,json:async()
 const pending=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 const tick=async()=>{for(let i=0;i<15;i++)await Promise.resolve();};
 
-async function setup(withImports=false){
+async function setup(withImports=false,withCompatible=false){
   const elements=new Map(),listeners=new Map(),intervals=[],calls=[],created=[],uploads=[];let timer=0;
   class Element{
     constructor(id=''){this.id=id;this.className='';this.textContent='';this.innerHTML='';this.hidden=false;this.disabled=false;this.open=false;this.value='';this.dataset={};this.style={};this.listeners={};this.currentTime=0;this.classList={contains:name=>this.className.split(' ').includes(name),toggle:(name,on)=>{const values=new Set(this.className.split(' ').filter(Boolean));on?values.add(name):values.delete(name);this.className=[...values].join(' ');},add:name=>this.classList.toggle(name,true),remove:name=>this.classList.toggle(name,false)};}
@@ -33,6 +33,7 @@ async function setup(withImports=false){
   const context=vm.createContext({document,location:{hostname:'127.0.0.1',origin:'http://127.0.0.1:8767',hash:'',pathname:'/'},history:{replaceState(){}},URL,URLSearchParams,AbortController,AbortSignal,Blob,Date,console,XMLHttpRequest:FakeXHR,crypto:{randomUUID:()=> 'request-id'},setTimeout:()=>++timer,clearTimeout(){},setInterval:(fn,ms)=>{intervals.push({fn,ms});return ++timer;},fetch:(url,options={})=>{calls.push({url,options});return harness.fetchImpl(url,options);}});
   vm.runInContext(source+'\nglobalThis.app={state,api,refresh,review,reportError,setConnection,nextEpoch,connectionContext,probeIfVisible,toast,updateReviewActions,renderJobs,refreshTechnicalTests,selectJobFilter,previewSource,sourcePreview,safeVideoFilename,downloadReviewedVideo,newJob,presets,updatePresetHelp,renderAssets};',context);
   if(withImports){vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/local-imports.js'),'utf8')+'\nObject.assign(app,{localImports,refreshLocalLibrary,localRequest,startLocalImport,selectImportFile,renderLocalImports,updateLocalImportAccess});',context);}
+  if(withCompatible){vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/compatible-preview.js'),'utf8')+'\nObject.assign(app,{compatibilityPreview,requestCompatibilityPreview,resetCompatibilityPreview,updateCompatibilityControls});',context);}
   await tick();
   harness.app=context.app;calls.length=0;
   harness.configure=(connected=true)=>{Object.assign(harness.app.state,{base:'http://127.0.0.1:8767',token:'a'.repeat(32),localGateway:true,jobs:[{id:'j1',title:'Existing',status:'review',source:'source.mp4'}],assets:[{source:'source.mp4',name:'source.mp4',size:10,extension:'.mp4'}],config:{delivery:{enabled:true,configured:true}},selected:{id:'j1',status:'review'},lastSuccessAt:Date.now()});harness.app.setConnection(connected,undefined,connected?'connected':'error');};
@@ -160,6 +161,48 @@ test('incomplete 200 status cannot show green or replace cached jobs',async()=>{
 });
 
 const diagnosticJob=()=>({id:'qa1',title:'old-colorbar-render-name',source:'synthetic-qa.mp4',job_kind:'technical_test',diagnostic_reason:'合成彩条与测试音，仅验证链路。',status:'review',has_video:false,plan:{duration:3,clips:[]},result:{qc:{passed:true}}});
+
+test('compatible preview switches viewing source while download remains original MP4',async()=>{
+  const h=await setup(false,true);h.configure();h.app.state.mediaStreaming=true;h.app.state.config.preview_supported=true;
+  h.fetchImpl=async url=>url.endsWith('/preview')?result({status:'ready',video_url:'/api/jobs/j1/video?preview=webm'}):result({job:{id:'j1',title:'旁白样片',status:'review',has_video:true,video_url:'/api/jobs/j1/video'}});
+  await h.app.review('j1');h.elements.get('reviewVideo').currentTime=6;
+  await h.app.requestCompatibilityPreview();
+  assert.match(h.app.state.videoSource,/preview=webm$/);assert.equal(h.app.compatibilityPreview.mode,'webm');
+  h.app.downloadReviewedVideo();assert.equal(h.created.at(-1).href,'http://127.0.0.1:8767/api/jobs/j1/video');assert.equal(h.created.at(-1).download,'旁白样片.mp4');
+  const writes=h.calls.filter(c=>c.options.method==='POST');assert.equal(writes.length,1);assert.match(writes[0].url,/\/preview$/);
+  await h.app.requestCompatibilityPreview();assert.equal(h.app.compatibilityPreview.mode,'original');assert.equal(h.app.state.videoSource,'http://127.0.0.1:8767/api/jobs/j1/video');
+  assert.equal(h.calls.filter(c=>c.options.method==='POST').length,1);
+});
+
+test('closing or changing review ignores a late compatible-preview response',async()=>{
+  const h=await setup(false,true);h.configure();h.app.state.mediaStreaming=true;h.app.state.config.preview_supported=true;
+  h.app.state.selected={id:'j1',has_video:true,video_url:'/api/jobs/j1/video'};h.elements.get('reviewDialog').showModal();
+  const hold=pending();h.fetchImpl=()=>hold.promise;const work=h.app.requestCompatibilityPreview();
+  h.app.resetCompatibilityPreview();h.app.state.selected={id:'j2'};h.app.state.videoSource='second-job-video';
+  hold.resolve(result({status:'ready',video_url:'/api/jobs/j1/video?preview=webm'}));await work;
+  assert.equal(h.app.state.videoSource,'second-job-video');assert.equal(h.app.compatibilityPreview.mode,'original');
+});
+
+test('preview generation failure leaves the original playable and does not disconnect GPU',async()=>{
+  const h=await setup(false,true);h.configure();h.app.state.mediaStreaming=true;h.app.state.config.preview_supported=true;
+  h.app.state.selected={id:'j1',has_video:true,video_url:'/api/jobs/j1/video'};h.app.state.videoSource='original-video';h.elements.get('reviewDialog').showModal();
+  h.fetchImpl=async()=>result({status:'failed',error:'兼容预览暂不可用，请下载原成片。'});
+  await h.app.requestCompatibilityPreview();await h.app.requestCompatibilityPreview();
+  assert.equal(h.app.state.connected,true);assert.equal(h.app.state.videoSource,'original-video');assert.equal(h.calls.length,1);assert.equal(h.app.compatibilityPreview.failed,true);
+});
+
+test('compatibility status cannot redirect the media player to another job or external site',async()=>{
+  const h=await setup(false,true);h.configure();h.app.state.mediaStreaming=true;h.app.state.config.preview_supported=true;
+  h.app.state.selected={id:'j1',has_video:true,video_url:'/api/jobs/j1/video'};h.app.state.videoSource='original-video';h.elements.get('reviewDialog').showModal();
+  h.fetchImpl=async()=>result({status:'ready',video_url:'/api/jobs/j2/video?preview=webm'});
+  await h.app.requestCompatibilityPreview();assert.equal(h.app.state.videoSource,'original-video');assert.equal(h.app.compatibilityPreview.busy,false);assert.equal(h.app.state.connected,true);
+});
+
+test('transport failure during preview preparation releases busy state for manual reconciliation',async()=>{
+  const h=await setup(false,true);h.configure();h.app.state.mediaStreaming=true;h.app.state.config.preview_supported=true;
+  h.app.state.selected={id:'j1',has_video:true,video_url:'/api/jobs/j1/video'};h.elements.get('reviewDialog').showModal();h.fetchImpl=async()=>result({detail:'GPU unavailable'},503);
+  await h.app.requestCompatibilityPreview();assert.equal(h.app.compatibilityPreview.busy,false);assert.equal(h.app.state.connected,false);assert.equal(h.calls.length,1);
+});
 
 test('technical tests are excluded from production overview and counts',async()=>{
   const h=await setup();h.configure();

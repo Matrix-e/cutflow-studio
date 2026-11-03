@@ -29,6 +29,7 @@ from . import __version__
 from .store import StateConflict, Store
 from .collection_service import register_collection_routes
 from .profiles import display_name, import_mode
+from .preview import PreviewManager, PreviewError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts"}
@@ -122,6 +123,7 @@ def public_job(job: dict, *, inbox: Path, store: Store) -> dict:
     result["video_url"] = f"/api/jobs/{job['id']}/video" if result["has_video"] else None
     result["retry_block_reason"] = retry_block_reason(job, inbox, store)
     result["can_retry"] = result["retry_block_reason"] is None
+    result["preview_supported"] = True
     return result
 
 
@@ -241,6 +243,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     (data / "renders").mkdir(exist_ok=True)
     store = Store(data / "studio.sqlite3")
     worker = Worker(store, inbox_path, data)
+    previews = PreviewManager(data)
     gpu_status = detect_gpu()
 
     @asynccontextmanager
@@ -251,6 +254,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         try:
             yield
         finally:
+            previews.stop()
             if start_worker:
                 collection_worker.stop()
                 worker.stop()
@@ -259,6 +263,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.worker = store, worker
     app.state.data, app.state.inbox = data, inbox_path
+    app.state.previews = previews
     origins = [v.strip() for v in os.getenv("CUTFLOW_ALLOWED_ORIGINS", "").split(",") if v.strip()]
     if origins:
         if "*" in origins:
@@ -293,6 +298,12 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
             raise HTTPException(404, "任务不存在")
         return job
 
+    def get_output(job: dict) -> Path:
+        output = Path(job["output_path"]).resolve() if job.get("output_path") else None
+        if output is None or not output.is_relative_to(data / "renders") or not output.is_file():
+            raise HTTPException(404, "该任务还没有可播放的成片")
+        return output
+
     @app.exception_handler(StateConflict)
     async def conflict_handler(request, exc):
         content = {"detail": str(exc)}
@@ -308,7 +319,8 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     def config():
         automatic = os.getenv("CUTFLOW_AUTO_PUBLISH") == "1"
         return {"inbox": str(inbox_path), "data_dir": str(data), "delivery": delivery_state(),
-                "review_required": not automatic, "auto_publish": automatic, "supported_extensions": sorted(MEDIA_EXTENSIONS)}
+                "review_required": not automatic, "auto_publish": automatic, "supported_extensions": sorted(MEDIA_EXTENSIONS),
+                "preview_supported": True}
 
     @app.get("/api/status", dependencies=[Depends(authorize)])
     def status():
@@ -393,13 +405,31 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         return {"job": job}
 
     @app.get("/api/jobs/{job_id}/video", dependencies=[Depends(authorize)])
-    def video(job_id: str):
+    def video(job_id: str, preview: Literal["webm"] | None = None):
         job = get_job(job_id)
-        output = Path(job["output_path"]).resolve() if job.get("output_path") else None
-        if output is None or not output.is_relative_to(data / "renders") or not output.is_file():
-            raise HTTPException(404, "该任务还没有可播放的成片")
+        output = get_output(job)
+        if preview == "webm":
+            try:
+                compatible = previews.video_path(job_id, output)
+            except PreviewError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            if compatible is None:
+                raise HTTPException(404, "兼容预览尚未生成，请先从任务页面生成预览")
+            return FileResponse(compatible, media_type="video/webm",
+                                filename=video_download_name(job["title"])[:-4] + "-预览.webm",
+                                content_disposition_type="inline")
         return FileResponse(output, media_type="video/mp4", filename=video_download_name(job["title"]),
                             content_disposition_type="inline")
+
+    @app.get("/api/jobs/{job_id}/preview", dependencies=[Depends(authorize)])
+    def preview_status(job_id: str):
+        job = get_job(job_id)
+        return previews.status(job_id, get_output(job))
+
+    @app.post("/api/jobs/{job_id}/preview", dependencies=[Depends(authorize)])
+    def generate_preview(job_id: str):
+        job = get_job(job_id)
+        return previews.request(job_id, get_output(job))
 
     @app.post("/api/jobs/{job_id}/approve", dependencies=[Depends(authorize)])
     def approve(job_id: str):
