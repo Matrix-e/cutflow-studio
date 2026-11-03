@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import threading
 
 import anyio
 import httpx
@@ -22,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from . import __version__
+from .local_library import LocalLibrary, ImportProblem
 
 ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM = 'http://127.0.0.1:8766'
@@ -60,10 +62,30 @@ def _transport_failure(exc: httpx.HTTPError, method: str):
 
 
 def create_app(*, gpu_token: str, local_token: str | None = None,
-               upstream_transport=None, web_root: Path | None = None) -> FastAPI:
+               upstream_transport=None, web_root: Path | None = None,
+               inbox: Path | None = None, data_dir: Path | None = None,
+               sync_target: dict | None = None) -> FastAPI:
     if not isinstance(gpu_token, str) or not 24 <= len(gpu_token) <= 4096 or any(ord(c) < 33 for c in gpu_token):
         raise ValueError('GPU 访问配置无效，请重新连接 GPU 工作台。')
     desktop_token = local_token or secrets.token_urlsafe(32)
+    local_library = None
+    library_lock = threading.Lock()
+
+    def library():
+        nonlocal local_library
+        with library_lock:
+            if local_library is None:
+                local_library = LocalLibrary(Path(inbox or os.getenv('CUTFLOW_INBOX', ROOT / '素材投递箱')),
+                                             Path(data_dir or os.getenv('CUTFLOW_DATA', ROOT / 'data')),
+                                             target=sync_target)
+            return local_library
+
+    def authorized(request):
+        return hmac.compare_digest(request.headers.get('authorization', '').encode(),
+                                   ('Bearer ' + desktop_token).encode())
+
+    def unauthorized():
+        return JSONResponse({'detail': '本地连接已失效，请刷新页面自动重新连接。'}, status_code=401)
     client = httpx.AsyncClient(base_url=UPSTREAM, transport=upstream_transport, trust_env=False,
                               follow_redirects=False, timeout=API_TIMEOUT,
                               headers={'Accept-Encoding': 'identity'})
@@ -109,14 +131,73 @@ def create_app(*, gpu_token: str, local_token: str | None = None,
         # Cross-origin JS cannot set this header without a denied CORS preflight.
         if request.headers.get('x-cutflow-local') != '1':
             return JSONResponse({'detail': '请从本地工作台页面打开。'}, status_code=403)
-        return {'token': desktop_token, 'local_gateway': True}
+        response = JSONResponse({'token': desktop_token, 'local_gateway': True, 'media_streaming': True})
+        response.set_cookie('cutflow_media', desktop_token, httponly=True, samesite='strict', path='/api')
+        return response
+
+    @app.get('/local-api/library')
+    async def local_library_list(request: Request):
+        if not authorized(request):
+            return unauthorized()
+        try:
+            return await anyio.to_thread.run_sync(lambda: library().listing())
+        except ImportProblem as exc:
+            return JSONResponse({'detail': str(exc)}, status_code=exc.status)
+        except OSError:
+            return JSONResponse({'detail': '本机素材目录暂时不可用，请检查磁盘和目录配置。'}, status_code=503)
+
+    @app.post('/local-api/import')
+    async def local_import(request: Request):
+        if not authorized(request):
+            return unauthorized()
+        if request.headers.get('content-type', '').split(';')[0].strip().lower() != 'application/octet-stream':
+            return JSONResponse({'detail': '请通过工作台选择视频文件导入。'}, status_code=415)
+        query = request.query_params
+        if set(query) != {'filename', 'mode', 'id'} or any(len(query.getlist(k)) != 1 for k in query):
+            return JSONResponse({'detail': '导入参数不完整或重复。'}, status_code=400)
+        upload = None
+        try:
+            length_text = request.headers.get('content-length')
+            if length_text is not None and not length_text.isdecimal():
+                raise ImportProblem('文件长度无效。')
+            length = int(length_text) if length_text is not None else None
+            upload = await anyio.to_thread.run_sync(lambda: library().begin(query['id'], query['filename'], query['mode'], length))
+            async for chunk in request.stream():
+                if chunk:
+                    await anyio.to_thread.run_sync(upload.write, chunk)
+            return await anyio.to_thread.run_sync(upload.finish)
+        except ImportProblem as exc:
+            return JSONResponse({'detail': str(exc)}, status_code=exc.status)
+        except Exception:
+            return JSONResponse({'detail': '导入未确认完成，请重新读取本机导入记录后再试。'}, status_code=503)
+        finally:
+            if upload is not None:
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(upload.close)
+
+    @app.post('/local-api/open-folder')
+    async def open_inbox(request: Request):
+        if not authorized(request):
+            return unauthorized()
+        if request.query_params:
+            return JSONResponse({'detail': '这里只能打开已配置的素材目录。'}, status_code=400)
+        async for chunk in request.stream():
+            if chunk:
+                return JSONResponse({'detail': '这里只能打开已配置的素材目录。'}, status_code=400)
+        if os.name != 'nt':
+            return JSONResponse({'detail': '此功能需要 Windows 本机工作台。'}, status_code=503)
+        try:
+            await anyio.to_thread.run_sync(lambda: os.startfile(str(library().inbox)))
+            return {'opened': True}
+        except (OSError, ImportProblem):
+            return JSONResponse({'detail': '暂时无法打开素材目录，请检查目录是否可访问。'}, status_code=503)
 
     @app.api_route('/api/{path:path}', methods=['GET', 'POST', 'PATCH'])
     async def proxy(path: str, request: Request):
-        supplied = request.headers.get('authorization', '')
-        expected = 'Bearer ' + desktop_token
-        if not hmac.compare_digest(supplied.encode(), expected.encode()):
-            return JSONResponse({'detail': '本地连接已失效，请刷新页面自动重新连接。'}, status_code=401)
+        media_get = request.method == 'GET' and (path == 'assets/video' or re.fullmatch(r'jobs/[A-Za-z0-9_-]+/video', path) is not None)
+        cookie_authorized = media_get and hmac.compare_digest(request.cookies.get('cutflow_media', '').encode(), desktop_token.encode())
+        if not authorized(request) and not cookie_authorized:
+            return unauthorized()
         if not re.fullmatch(r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*', path):
             return JSONResponse({'detail': '请求路径无效。'}, status_code=400)
         content = bytearray()
@@ -216,12 +297,18 @@ def main():
     parser.add_argument('--host', choices=['127.0.0.1'], default='127.0.0.1')
     parser.add_argument('--port', choices=[PORT], type=int, default=PORT)
     args = parser.parse_args()
+    # Reuse the existing trusted local launcher configuration. None of its
+    # credentials are returned by the local library endpoints.
+    from scripts.start_local import environment
+    configured = environment()
     token = os.getenv('CUTFLOW_GPU_TOKEN', '').strip()
     if not token:
-        data = Path(os.getenv('CUTFLOW_DATA', str(ROOT / 'data')))
+        data = Path(configured['CUTFLOW_DATA'])
         token = (data / 'gpu-access-token.txt').read_text(encoding='utf-8').strip()
     import uvicorn
-    uvicorn.run(create_app(gpu_token=token), host=args.host, port=args.port, access_log=False, proxy_headers=False)
+    uvicorn.run(create_app(gpu_token=token, inbox=Path(configured['CUTFLOW_INBOX']),
+                          data_dir=Path(configured['CUTFLOW_DATA']), sync_target=configured),
+                host=args.host, port=args.port, access_log=False, proxy_headers=False)
 
 
 if __name__ == '__main__':

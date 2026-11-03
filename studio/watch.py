@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .sync import candidate_files, stable_hash
+from .profiles import display_name, effective_settings
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts"}
 
@@ -146,17 +147,19 @@ class Watcher:
                 else:
                     digest, _ = stable_hash(path)
                     self.hash_cache[relative] = (signature, digest)
-                identity = json.dumps([self.api_url, relative, digest, self.settings_json], ensure_ascii=False)
+                settings = effective_settings(relative, self.settings)
+                settings_json = json.dumps(settings, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+                identity = json.dumps([self.api_url, relative, digest, settings_json], ensure_ascii=False)
                 request_key = "watch-" + hashlib.sha256(identity.encode()).hexdigest()
                 with self.connection() as con:
                     con.execute("INSERT OR IGNORE INTO submissions(request_key,source,sha256,settings,updated_at) VALUES(?,?,?,?,?)",
-                                (request_key,relative,digest,self.settings_json,moment))
+                                (request_key,relative,digest,settings_json,moment))
                     row = con.execute("SELECT * FROM submissions WHERE request_key=?", (request_key,)).fetchone()
                 if row["status"] in {"submitted","technical_test"} or row["next_retry"] > moment:
                     continue
                 try:
-                    response = self._request("POST", "/api/jobs", json={"source": relative, "title": path.stem,
-                        "settings": self.settings, "idempotency_key": request_key})
+                    response = self._request("POST", "/api/jobs", json={"source": relative, "title": Path(display_name(relative)).stem,
+                        "settings": settings, "idempotency_key": request_key})
                     if response.status_code == 409 and response.json().get("code") == "technical_test_source":
                         self._mark_diagnostic(relative,request_key)
                         results.append({"source":relative,"status":"technical_test","message":"已登记的技术测试素材已排除正式剪辑队列"})

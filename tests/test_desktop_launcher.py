@@ -12,9 +12,10 @@ from scripts.start_desktop import DesktopError, LOCAL_URL, main, prepare_desktop
 
 
 class FakeClient:
-    def __init__(self, *, first_absent=False, foreign=False, bad_nonce=False):
+    def __init__(self, *, first_absent=False, foreign=False, bad_nonce=False, gpu_offline=False):
         self.first_absent, self.foreign, self.bad_nonce = first_absent, foreign, bad_nonce
         self.calls = []
+        self.gpu_offline = gpu_offline
 
     def __enter__(self): return self
     def __exit__(self, *args): pass
@@ -28,7 +29,7 @@ class FakeClient:
             return httpx.Response(200, json={"service": "other-app" if self.foreign else "cutflow-local-gateway", "project_id": "cutflow-studio"})
         if url.endswith("/local-session"):
             return httpx.Response(200, json={"token": "gateway-only-nonce", "local_gateway": not self.bad_nonce})
-        return httpx.Response(200, json={"execution_target": "remote_gpu"})
+        return httpx.Response(503 if self.gpu_offline else 200, json={"execution_target": "remote_gpu"})
 
 
 class DesktopLauncherTests(unittest.TestCase):
@@ -47,7 +48,7 @@ class DesktopLauncherTests(unittest.TestCase):
              patch("scripts.start_desktop.ensure_gpu", return_value=True), \
              patch("scripts.start_desktop.spawn_gateway") as spawn:
             result = prepare_desktop(self.env)
-        self.assertEqual({"url": LOCAL_URL + "/", "reused": True}, result)
+        self.assertEqual({"url": LOCAL_URL + "/", "reused": True, "gpu_connected": True}, result)
         spawn.assert_not_called()
         self.assertNotIn(self.token, str(client.calls))
         self.assertEqual("Bearer gateway-only-nonce", client.calls[-1][1]["headers"]["Authorization"])
@@ -93,6 +94,27 @@ class DesktopLauncherTests(unittest.TestCase):
              patch("scripts.start_desktop.webbrowser.open") as opened, redirect_stdout(io.StringIO()):
             self.assertEqual(0, main([]))
         opened.assert_called_once_with(LOCAL_URL + "/")
+
+    def test_offline_gpu_does_not_prevent_local_import_workspace_start(self):
+        client = FakeClient(first_absent=True, gpu_offline=True)
+        output = io.StringIO()
+        with patch("scripts.start_desktop.environment", return_value=self.env), \
+             patch("scripts.start_desktop.httpx.Client", return_value=client), \
+             patch("scripts.start_desktop.ensure_gpu", side_effect=OSError("unreachable")), \
+             patch("scripts.start_desktop.spawn_gateway", return_value=SimpleNamespace(poll=lambda: None)) as spawn, \
+             patch("scripts.start_desktop.webbrowser.open") as opened, redirect_stdout(output):
+            self.assertEqual(0, main([]))
+        spawn.assert_called_once()
+        opened.assert_called_once_with(LOCAL_URL + "/")
+        self.assertIn("可以先导入视频", output.getvalue())
+        self.assertNotIn(self.token, output.getvalue())
+
+    def test_invalid_local_session_still_blocks_offline_workspace(self):
+        client = FakeClient(bad_nonce=True, gpu_offline=True)
+        with patch("scripts.start_desktop.httpx.Client", return_value=client), \
+             patch("scripts.start_desktop.ensure_gpu", return_value=False):
+            with self.assertRaises(DesktopError):
+                prepare_desktop(self.env)
 
 
 if __name__ == "__main__": unittest.main()

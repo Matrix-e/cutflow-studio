@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import threading
+import unicodedata
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -27,11 +28,26 @@ from pydantic import BaseModel, Field
 from . import __version__
 from .store import StateConflict, Store
 from .collection_service import register_collection_routes
+from .profiles import display_name, import_mode
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts"}
+MEDIA_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".mkv": "video/x-matroska",
+               ".webm": "video/webm", ".avi": "video/x-msvideo", ".m4v": "video/mp4", ".mts": "video/mp2t"}
 EDIT_SETTINGS = {"silence_min", "silence_db", "padding", "min_clip", "target_aspect", "fps", "encoder", "crf",
                  "normalize_audio", "remove_silence", "source_ranges", "width", "height", "srt_path"}
+
+
+def video_download_name(title: str) -> str:
+    """Readable download metadata only; never changes the stored render path."""
+    stem = "".join(char for char in title if char not in '<>:"/\\|?*'
+                   and not unicodedata.category(char).startswith("C")).strip(" .")
+    # Bound both Windows characters and UTF-8 bytes for other download targets.
+    stem = stem[:100].encode("utf-8")[:180].decode("utf-8", errors="ignore").rstrip(" .")
+    if not stem or re.fullmatch(r"CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]",
+                                stem.split(".")[0].rstrip(" "), re.IGNORECASE):
+        stem = "视频成片"
+    return stem + ".mp4"
 
 
 def detect_gpu() -> dict:
@@ -80,12 +96,32 @@ def safe_source(inbox: Path, relative: str) -> Path:
     return resolved
 
 
-def public_job(job: dict) -> dict:
+def retry_block_reason(job: dict, inbox: Path, store: Store) -> str | None:
+    """One authoritative check shared by UI capability hints and retry writes."""
+    if job["job_kind"] == "technical_test":
+        return "技术测试记录不能作为正式视频重新剪辑"
+    if job["status"] != "failed":
+        return "只有失败的剪辑任务可以重新排队"
+    if job.get("publication") is not None or any(event["status"] == "publishing" for event in store.events(job["id"])):
+        return "发布失败或发送结果未知的任务不能用此按钮重试，请先核实企业微信"
+    try:
+        source = safe_source(inbox, job["source"])
+        stat = source.stat()
+    except (ValueError, OSError) as exc:
+        return str(exc) if isinstance(exc, ValueError) else "素材暂时无法读取，请检查投递箱"
+    if (stat.st_size, stat.st_mtime_ns) != (job["source_size"], job["source_mtime_ns"]):
+        return "素材已变化，请新建任务以保留原有剪辑记录"
+    return None
+
+
+def public_job(job: dict, *, inbox: Path, store: Store) -> dict:
     # Do not disclose machine paths through results; relative inbox path is enough.
     result = {key: value for key, value in job.items()
               if key not in {"output_path", "fingerprint", "source_size", "source_mtime_ns"}}
     result["has_video"] = bool(job.get("output_path") and Path(job["output_path"]).is_file())
     result["video_url"] = f"/api/jobs/{job['id']}/video" if result["has_video"] else None
+    result["retry_block_reason"] = retry_block_reason(job, inbox, store)
+    result["can_retry"] = result["retry_block_reason"] is None
     return result
 
 
@@ -299,14 +335,26 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                 stat = checked.stat()
             except (ValueError, OSError):
                 continue
-            found.append({"source": relative, "name": path.name, "size": stat.st_size,
+            found.append({"source": relative, "name": path.name, "display_name": display_name(relative),
+                          "suggested_preset": import_mode(relative), "size": stat.st_size,
                           "modified_ns": stat.st_mtime_ns, "modified_at": stat.st_mtime,
                           "extension": path.suffix.lower()})
         return {"assets": sorted(found, key=lambda item: item["modified_ns"], reverse=True), "limit": 1000}
 
+    @app.get("/api/assets/video", dependencies=[Depends(authorize)])
+    def asset_video(source: str = Query(min_length=1, max_length=4096)):
+        try:
+            path = safe_source(inbox_path, source)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if path.relative_to(inbox_path).as_posix() in store.technical_test_sources():
+            raise HTTPException(409, "该素材已登记为技术测试，请从技术测试记录查看验证资料")
+        return FileResponse(path, media_type=MEDIA_TYPES[path.suffix.lower()], filename=display_name(path.name),
+                            content_disposition_type="inline")
+
     @app.get("/api/jobs", dependencies=[Depends(authorize)])
     def jobs(limit: int = Query(default=100, ge=1, le=500), kind: Literal["production","technical_test"] = "production"):
-        return {"jobs": [public_job(job) for job in store.list(limit, kind=kind)]}
+        return {"jobs": [public_job(job, inbox=inbox_path, store=store) for job in store.list(limit, kind=kind)]}
 
     @app.post("/api/jobs", dependencies=[Depends(authorize)])
     def new_job(body: NewJob, idempotency_key: str | None = Header(default=None)):
@@ -335,12 +383,12 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                                     fingerprint=fingerprint, source_size=stat.st_size, source_mtime_ns=stat.st_mtime_ns,
                                     idempotency_key=key)
         worker.wake_event.set()
-        return JSONResponse(status_code=201 if created else 200, content={"job": public_job(job), "created": created,
+        return JSONResponse(status_code=201 if created else 200, content={"job": public_job(job, inbox=inbox_path, store=store), "created": created,
                             "owned_by_request": store.owned_by_request(job["id"], key)})
 
     @app.get("/api/jobs/{job_id}", dependencies=[Depends(authorize)])
     def job_detail(job_id: str):
-        job = public_job(get_job(job_id))
+        job = public_job(get_job(job_id), inbox=inbox_path, store=store)
         job["events"] = store.events(job_id)
         return {"job": job}
 
@@ -350,7 +398,8 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         output = Path(job["output_path"]).resolve() if job.get("output_path") else None
         if output is None or not output.is_relative_to(data / "renders") or not output.is_file():
             raise HTTPException(404, "该任务还没有可播放的成片")
-        return FileResponse(output, media_type="video/mp4", filename=f"{job_id}.mp4", content_disposition_type="inline")
+        return FileResponse(output, media_type="video/mp4", filename=video_download_name(job["title"]),
+                            content_disposition_type="inline")
 
     @app.post("/api/jobs/{job_id}/approve", dependencies=[Depends(authorize)])
     def approve(job_id: str):
@@ -358,32 +407,22 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         if job["job_kind"] == "technical_test":
             raise HTTPException(409, "这是技术测试记录，不能确认为可发布的正式成片")
         if job["status"] in {"approved", "published"}:
-            return {"job": public_job(job)}
+            return {"job": public_job(job, inbox=inbox_path, store=store)}
         if (job.get("result") or {}).get("qc", {}).get("passed") is not True:
             raise HTTPException(409, "成片检查未通过，不能确认发布")
         updated = store.transition(job_id, ["review"], "approved", "用户已确认成片，可以发布")
-        return {"job": public_job(updated)}
+        return {"job": public_job(updated, inbox=inbox_path, store=store)}
 
     @app.post("/api/jobs/{job_id}/retry", dependencies=[Depends(authorize)])
     def retry(job_id: str):
         job = get_job(job_id)
-        if job["job_kind"] == "technical_test":
-            raise HTTPException(409, "技术测试记录不能作为正式视频重新剪辑")
-        if job["status"] != "failed":
-            raise HTTPException(409, "只有失败的剪辑任务可以重新排队")
-        if job.get("publication") is not None or any(event["status"] == "publishing" for event in store.events(job_id)):
-            raise HTTPException(409, "发布失败或发送结果未知的任务不能用此按钮重试，请先核实企业微信")
-        try:
-            source = safe_source(inbox_path, job["source"])
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        stat = source.stat()
-        if (stat.st_size, stat.st_mtime_ns) != (job["source_size"], job["source_mtime_ns"]):
-            raise HTTPException(409, "素材已变化，请新建任务以保留原有剪辑记录")
+        reason = retry_block_reason(job, inbox_path, store)
+        if reason is not None:
+            raise HTTPException(409, reason)
         updated = store.transition(job_id, ["failed"], "queued", "用户请求重新剪辑，已排队", plan=None,
                                    result=None, output_path=None, error=None, progress=0)
         worker.wake_event.set()
-        return {"job": public_job(updated)}
+        return {"job": public_job(updated, inbox=inbox_path, store=store)}
 
     @app.post("/api/jobs/{job_id}/publish", dependencies=[Depends(authorize)])
     def publish(job_id: str):
@@ -391,7 +430,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         if job["job_kind"] == "technical_test":
             raise HTTPException(409, "技术测试记录不能发布为正式视频")
         if job["status"] == "published":
-            return {"job": public_job(job), "already_published": True}
+            return {"job": public_job(job, inbox=inbox_path, store=store), "already_published": True}
         if job["status"] != "approved":
             raise HTTPException(409, "请先试看并确认成片")
         destination = delivery_state()
@@ -417,9 +456,9 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                        f"企业微信发送失败（{code}）。请检查本机发布配置。")
             updated = store.transition(job_id, ["publishing"], "failed" if uncertain else "approved", message,
                                        error=message, publication={"status": "unknown" if uncertain else "failed", "code": code})
-            return JSONResponse(status_code=502, content={"detail": message, "job": public_job(updated)})
+            return JSONResponse(status_code=502, content={"detail": message, "job": public_job(updated, inbox=inbox_path, store=store)})
         updated = store.transition(job_id, ["publishing"], "published", "企业微信已确认接收", publication=result, error=None)
-        return {"job": public_job(updated)}
+        return {"job": public_job(updated, inbox=inbox_path, store=store)}
 
     web_root = PROJECT_ROOT / "web"
     if web_root.is_dir():

@@ -41,21 +41,23 @@ def gateway_presence(client) -> str:
     return "owned" if owned else "foreign"
 
 
-def verify_gateway_session(client) -> None:
+def verify_gateway_session(client) -> bool:
     try:
         response = client.get(LOCAL_URL + "/local-session", headers={"X-CutFlow-Local": "1", "Origin": LOCAL_URL})
         body = response.json()
         if response.status_code != 200 or body.get("local_gateway") is not True or not isinstance(body.get("token"), str) or not body["token"]:
             raise DesktopError("本地工作台身份验证未完成，请检查当前版本。")
-        # A gateway-only nonce authenticates the proxy; the GPU token stays private.
-        status = client.get(LOCAL_URL + "/api/status", headers={"Authorization": "Bearer " + body["token"]})
-        result = status.json()
-        if status.status_code != 200 or result.get("execution_target") != "remote_gpu":
-            raise DesktopError("本地网页已启动，但 GPU 工作台尚未响应，请稍后重试。")
     except DesktopError:
         raise
     except Exception:
-        raise DesktopError("本地工作台连接检查未完成，请稍后重试。") from None
+        raise DesktopError("本地工作台身份检查未完成，请稍后重试。") from None
+    # A verified local gateway is useful for importing while the GPU is offline.
+    # Only its own nonce goes to the loopback proxy; GPU secrets stay private.
+    try:
+        status = client.get(LOCAL_URL + "/api/status", headers={"Authorization": "Bearer " + body["token"]})
+        return status.status_code == 200 and status.json().get("execution_target") == "remote_gpu"
+    except Exception:
+        return False
 
 
 def spawn_gateway(env: dict, gpu_token: str):
@@ -86,8 +88,6 @@ def prepare_desktop(env: dict, *, startup_timeout: float = 20) -> dict:
         presence = gateway_presence(client)
         if presence == "foreign":
             raise DesktopError("8767 端口正由其他服务使用，未复用或修改该服务。")
-        if not ensure_gpu(env, gpu_token):
-            raise DesktopError("GPU 连接暂未就绪，请检查 GPU 实例及 data/gpu-browser-connector.log 后重试。")
         reused = presence == "owned"
         if not reused:
             process = spawn_gateway(env, gpu_token)
@@ -103,8 +103,13 @@ def prepare_desktop(env: dict, *, startup_timeout: float = 20) -> dict:
                 time.sleep(0.25)
             else:
                 raise DesktopError("本地工作台启动超时，请检查 data/local-gateway.log。")
-        verify_gateway_session(client)
-    return {"url": LOCAL_URL + "/", "reused": reused}
+        try:
+            ensure_gpu(env, gpu_token, wait_seconds=6)
+        except Exception:
+            # Failure to start a GPU bridge must not prevent local intake.
+            pass
+        gpu_connected = verify_gateway_session(client)
+    return {"url": LOCAL_URL + "/", "reused": reused, "gpu_connected": gpu_connected}
 
 
 def main(argv=None):
@@ -116,6 +121,8 @@ def main(argv=None):
         if not args.no_browser:
             webbrowser.open(result["url"])
         print("本地工作台已就绪：" + result["url"])
+        if result.get("gpu_connected") is False:
+            print("GPU 暂未连接。可以先导入视频，文件会保存在本机，连接恢复后再同步处理。")
         print("连接信息会自动读取，无需手工填写；后台服务继续运行，可关闭此窗口。")
         return 0
     except DesktopError as error:

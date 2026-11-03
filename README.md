@@ -1,4 +1,4 @@
-# 商剪工坊 · CutFlow Studio v0.2
+# 商剪工坊 · CutFlow Studio v0.4
 
 为口播、课程、访谈搭建的本地素材接收、GPU 同步、基础剪辑、审片与企业微信内部群交付系统。第一版是可运行研发原型，尚未达到无人值守商用精剪验收标准。
 
@@ -7,12 +7,12 @@
 **新增抖音网页登录采集：** 双击 `启动抖音采集.cmd`，在独立 Chrome 中登录，再在工作台「关键词采集」管理任务。首批关键词为汽车托管、汽车租赁沙龙、AI沙龙。下载成功的素材先保存在本机，双击 `采用采集素材.cmd` 记录授权依据后进入素材投递箱。详细步骤与当前验证边界见 [采集使用说明](docs/browser-collection.md)。真实抖音登录与下载尚待实测，普通网页可看不保证可下载。
 
 1. 双击桌面 **商剪工坊**，或本目录 **打开本地工作台.cmd**。网站在本机 `http://127.0.0.1:8767/` 运行，自动连接远端 GPU，无需填写服务地址或令牌。后台连接器与网站持续运行，可关闭启动窗口。电脑重启后再次双击即可。
-2. 把一段 MP4 / MOV 等视频放进你指定的目录：
+2. 打开「素材库」，选择或拖入一段视频，选择处理方式，再点「导入到本机」。单文件最多 2 GiB；原文件不修改。口播、课程可选「口播保守处理」清理长停顿；品牌包装、音乐片或已有成片请选择「保留完整」。也可以把视频直接放进指定目录：
 
    `C:\Users\Administrator\Desktop\空间同步\BaiduSyncdisk\公司材料空间\视频素材`
 
-3. 文件连续稳定至少 15 秒后，会自动生成剪辑任务。也可以在页面「素材库」手动选择素材。
-4. 在「剪辑与审核」观看成片、查看检查报告。技术检查通过的成片才能审核和推送。
+3. 页面显示本机导入与同步状态。文件先在本机等待稳定，再同步到 GPU 等待稳定并自动生成一个任务；导入时选择的处理方式随目录一起到达。也可以在素材库预览原片或创建新的剪辑版本。
+4. 在「剪辑与审核」观看成片、查看检查报告，点击「下载成片」保存。下载不需要先审核；技术检查通过的成片才能审核和推送。失败任务只有在后端判断可以安全重试时显示重试入口。
 5. 首次接企业微信时，双击 **配置GPU企业微信.cmd**。在本机隐藏输入群机器人的 Webhook，不要发到聊天里。配置经 SSH 写入远端私有运行目录，权限为 0600，不在本机保存，不发送测试消息。刷新工作台后可审核并推送。
 
 当前本机访问 GPU 的地址是 `http://127.0.0.1:8766`，仅在连接器运行时可用。连接使用专用密钥；服务器主机公钥在首次连接记录，此后严格匹配。密钥只允许 SFTP 和远端 `127.0.0.1:8765` 的端口转发，不能运行远端 shell 命令。按 Ctrl+C 关闭本机连接器，不会关闭租用的 GPU 实例。
@@ -57,10 +57,10 @@ v0.1 实机验收：本机与 GPU 各通过 **64 项测试**。测试视频通�
 
 **连接GPU工作台.cmd** 已经实现本机同步 + SSH 转发，远端观察器和渲染服务由独立守护程序管理。它不是 Windows 开机服务；本机重启后需要再次启动。GPU 实例重启后需要重新启动远端守护程序，当前尚未修改容器的启动配置。
 
-当前远端版本目录为 `/root/autodl-tmp/cutflow-studio/releases/v0.2-20261102-browser`，独立 Python 位于 `/root/autodl-tmp/cutflow-studio/runtime/bin/python`。实例重启后可在远端运行：
+当前远端版本目录为 `/root/autodl-tmp/cutflow-studio/releases/v0.4-20261103-final`，独立 Python 位于 `/root/autodl-tmp/cutflow-studio/runtime/bin/python`。实例重启后可在远端运行：
 
 ```sh
-nohup /root/autodl-tmp/cutflow-studio/runtime/bin/python /root/autodl-tmp/cutflow-studio/releases/v0.2-20261102-browser/scripts/run_gpu.py > /root/autodl-tmp/cutflow-studio/data/supervisor.log 2>&1 < /dev/null &
+nohup /root/autodl-tmp/cutflow-studio/runtime/bin/python /root/autodl-tmp/cutflow-studio/releases/v0.4-20261103-final/scripts/run_gpu.py > /root/autodl-tmp/cutflow-studio/data/supervisor.log 2>&1 < /dev/null &
 ```
 
 该入口自动读取已有访问令牌；不需要把令牌放入命令行。远端运行数据在 `/root/autodl-tmp/cutflow-studio/data`，原始同步素材在 `inbox`，成片在 `data/renders`。系统盘没有安装新模型，依赖和缓存都放在数据盘。
@@ -108,3 +108,4 @@ GitHub 连接已验证，但尚未选择本项目的目标仓库。源码先保�
 ## v0.2 采集交付验收
 
 本机和 GPU 各通过 123 项测试，新版服务已部署，三个关键词任务已建立（每 6 小时、每次最多 5 条）。采集页面已发布到既有私有站点。当前状态是等待本机采集器及首次人工登录；没有伪造采集结果，真实抖音下载尚未完成验收。来源与授权侧车目前保存在本机；既有同步程序只同步支持的媒体与字幕，不会同步授权 JSON。验收记录见 [采集验收](docs/collection-acceptance.json)。
+

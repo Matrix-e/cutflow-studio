@@ -2,13 +2,32 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const localPage = ['127.0.0.1','localhost','[::1]'].includes(location.hostname);
-const state = {base:localPage ? location.origin : '', token:'', connected:false, jobs:[], technicalTests:[],technicalTestCount:0,technicalLoading:null,technicalLoaded:false,assets:[], config:{}, filter:'all', selected:null, videoBlob:null,epoch:0,phase:'idle',lastCheckAt:null,lastSuccessAt:null,lastConnectionError:'',refreshing:null,requests:new Set(),localGateway:false,reauthNeeded:false,reauthAttempted:false,reviewRequest:0,actionBusy:false,toastKind:null};
+const state = {base:localPage ? location.origin : '', token:'', connected:false, jobs:[], technicalTests:[],technicalTestCount:0,technicalLoading:null,technicalLoaded:false,assets:[], config:{}, filter:'all', selected:null, videoBlob:null,videoSource:null,mediaStreaming:false,epoch:0,phase:'idle',lastCheckAt:null,lastSuccessAt:null,lastConnectionError:'',refreshing:null,requests:new Set(),localGateway:false,reauthNeeded:false,reauthAttempted:false,reviewRequest:0,actionBusy:false,toastKind:null};
 const statusNames = {queued:'排队中',analyzing:'分析素材',rendering:'渲染检查',review:'等待审核',approved:'已审核',publishing:'正在推送',published:'已推送',failed:'需要处理'};
-const presets = {gentle:{silence_min:0.9,padding:0.25,min_clip:0.5},course:{silence_min:1.5,padding:0.4,min_clip:0.8},compact:{silence_min:0.7,padding:0.2,min_clip:0.5}};
+const presets = {gentle:{silence_min:0.9,padding:0.25,min_clip:0.5,remove_silence:true,normalize_audio:true},course:{silence_min:1.5,padding:0.4,min_clip:0.8,remove_silence:true,normalize_audio:true},compact:{silence_min:0.7,padding:0.2,min_clip:0.5,remove_silence:true,normalize_audio:true},preserve:{remove_silence:false,normalize_audio:true,target_aspect:'original'}};
+const sourcePreview={source:null,blob:null,url:null,request:0};
+const mediaListeners=new WeakMap();
+function canStreamMedia(){return localPage&&state.localGateway&&state.mediaStreaming&&state.base===location.origin;}
+function mediaAddress(path){const url=new URL(path,state.base);if(url.origin!==location.origin||!/^\/api\/(?:assets\/video|jobs\/[^/]+\/video)$/.test(url.pathname))throw new Error('视频地址不可用。');return url.href;}
+function clearMediaElement(video){mediaListeners.get(video)?.();mediaListeners.delete(video);video.pause();video.removeAttribute('src');video.load?.();}
+function setMediaSource(video,status,url,valid,loadedMessage,assignSource=true){
+  mediaListeners.get(video)?.();
+  let checkedFailure=false;
+  const active=()=>valid()&&video.src===url&&(!video.currentSrc||video.currentSrc===url);
+  const loaded=()=>{if(active()){status.textContent=loadedMessage;status.className='media-status';}};
+  const failed=()=>{if(active()){status.textContent='视频暂时无法播放，请检查连接后重新打开，或确认原片格式是否受浏览器支持。';status.className='media-status error';if(!checkedFailure&&canStreamMedia()&&state.connected){checkedFailure=true;const address=new URL(url);api(address.pathname+address.search,{headers:{Range:'bytes=0-0'}},'headers').catch(error=>{if(active())reportError(error);});}}};
+  video.addEventListener('loadedmetadata',loaded);video.addEventListener('canplay',loaded);video.addEventListener('error',failed);
+  mediaListeners.set(video,()=>{video.removeEventListener?.('loadedmetadata',loaded);video.removeEventListener?.('canplay',loaded);video.removeEventListener?.('error',failed);});if(assignSource)video.src=url;
+}
+function assetName(asset){return asset?.display_name||asset?.name||asset?.source||'视频素材';}
+function suggestedPreset(source){return state.assets.find(a=>a.source===source)?.suggested_preset==='preserve'?'preserve':'gentle';}
+function updatePresetHelp(){const preserve=$('#editPreset').value==='preserve';$('#aspect').disabled=preserve;if(preserve)$('#aspect').value='original';$('#presetHelp').textContent=preserve?'完整保留所有画面与原有节奏，不裁剪停顿。保持原比例，仍会规范编码和整理音量；适合品牌包装、音乐片和已有成片。':'按音量检测长停顿，不会理解语义或自动删除口误。保留人物画面与原始语速；成片进入审核区。';}
+function safeVideoFilename(title){let name=String(title||'成片').replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g,'_').replace(/\.mp4$/i,'').trim().replace(/[. ]+$/g,'').slice(0,120);if(!name)name='成片';if(/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name))name='成片-'+name;return name+'.mp4';}
+function downloadReviewedVideo(){if(!state.selected||isTechnicalTest(state.selected)||!state.videoSource)return;const a=document.createElement('a');a.href=state.videoSource;a.download=safeVideoFilename(state.selected.title);a.click();toast('已开始下载成片；此操作不会审核或发布视频。');}
 let toastTimer;
 function toast(message,error=false,kind=null){state.toastKind=kind||(error&&message===state.lastConnectionError?'connection':'business');$('#toast').textContent=message;$('#toast').className='toast visible'+(error?' error':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>{$('#toast').className='toast';state.toastKind=null;},6500);}
 function reportError(error){if(error.stale||(!error.uncertain&&error.connectionEpoch!==undefined&&error.connectionEpoch!==state.epoch))return;toast(error.message,true,error.uncertain?'operation-uncertain':error.connectivity?'connection':'business');}
-function showPage(name){document.querySelectorAll('.page').forEach(el=>el.classList.toggle('active',el.id==='page-'+name));document.querySelectorAll('.nav').forEach(el=>el.classList.toggle('active',el.dataset.page===name));$('#pageTitle').textContent=({overview:'制作总览',assets:'素材库',jobs:'剪辑与审核',settings:'连接与设置',collections:'关键词采集'})[name] || '制作总览';if(name==='collections'&&typeof refreshCollections==='function')refreshCollections(true);}
+function showPage(name){document.querySelectorAll('.page').forEach(el=>el.classList.toggle('active',el.id==='page-'+name));document.querySelectorAll('.nav').forEach(el=>el.classList.toggle('active',el.dataset.page===name));$('#pageTitle').textContent=({overview:'制作总览',assets:'素材库',jobs:'剪辑与审核',settings:'连接与设置',collections:'关键词采集'})[name] || '制作总览';if(name==='collections'&&typeof refreshCollections==='function')refreshCollections(true);if(name==='assets'&&typeof refreshLocalLibrary==='function')refreshLocalLibrary(true);}
 function bytes(n){return n>=1073741824?(n/1073741824).toFixed(2)+' GB':(n/1048576).toFixed(1)+' MB';}
 function time(s){return Number.isFinite(Number(s))?Number(s).toFixed(1)+' 秒':'—';}
 function date(s){return s?new Date(typeof s==='number'?s*1000:s).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'';}
@@ -18,11 +37,12 @@ function staleRequest(){return Object.assign(new Error('连接状态已变化，
 function uncertainRequest(){return Object.assign(new Error('操作结果需核实，请查看任务记录；不会自动重复提交。'),{uncertain:true});}
 function nextEpoch(){state.epoch++;for(const request of state.requests)if(request.readOnly)request.controller.abort();}
 function isTechnicalTest(job){return job?.job_kind==='technical_test';}
-function updateReviewActions(){const j=state.selected,technical=isTechnicalTest(j);$('#approveButton').disabled=technical||!state.connected||state.actionBusy||j?.status!=='review';$('#publishButton').disabled=technical||!state.connected||state.actionBusy||j?.status!=='approved'||!state.config.delivery?.enabled||!state.config.delivery?.configured;$('#reviewActions').hidden=technical;$('#reviewActions').style.display=technical?'none':'';$('#technicalTestNotice').hidden=!technical;$('#reviewEyebrow').textContent=technical?'TECHNICAL TEST / 非正式成片':'FINAL REVIEW';$('#diagnosticReason').textContent=technical?(j.diagnostic_reason||'用于检查同步、GPU 编码和文件交付是否可用，不代表真实素材的剪辑效果。'):'';$('#reviewHelp').textContent=technical?'该测试记录仅供排查技术链路，不能审核为正式成片，也不能推送到企业微信群。':'推送会向已配置的群机器人发送成片文件。网络结果不确定时，请先到群内核实，避免重复发送。';}
+function updateReviewActions(){const j=state.selected,technical=isTechnicalTest(j);$('#approveButton').disabled=technical||!state.connected||state.actionBusy||j?.status!=='review';$('#publishButton').disabled=technical||!state.connected||state.actionBusy||j?.status!=='approved'||!state.config.delivery?.enabled||!state.config.delivery?.configured;$('#reviewActions').hidden=technical;$('#reviewActions').style.display=technical?'none':'';$('#downloadVideoButton').hidden=technical;$('#downloadVideoButton').disabled=technical||!j?.has_video||!state.videoSource;$('#retryJobButton').hidden=technical||j?.can_retry!==true;$('#retryJobButton').disabled=!state.connected||state.actionBusy||j?.can_retry!==true;$('#technicalTestNotice').hidden=!technical;$('#reviewEyebrow').textContent=technical?'TECHNICAL TEST / 非正式成片':'FINAL REVIEW';$('#diagnosticReason').textContent=technical?(j.diagnostic_reason||'用于检查同步、GPU 编码和文件交付是否可用，不代表真实素材的剪辑效果。'):'';$('#reviewHelp').textContent=technical?'该测试记录仅供排查技术链路，不能作为成片下载、审核或推送到企业微信群。':'下载只保存视频，不会审核或发布。推送会发送到已配置的企业微信群；结果不确定时先核实，避免重复发送。';$('#sourceStartButton').disabled=!state.connected||!sourcePreview.source;}
 function runtimeSettings(){
   if(localPage){let note=$('#desktopConnectionStatus');if(!note){note=document.createElement('div');note.id='desktopConnectionStatus';note.className='note';$('#connectionForm').before(note);}const runtime=state.connected?'GPU 已连接':state.phase==='checking'?'GPU 连接中':state.phase==='error'?'GPU 连接异常':'GPU 待连接';note.innerHTML='<strong>本地页面已运行</strong><p>连接方式：'+(state.localGateway?'本地自动连接':'手动配置')+'<br>'+runtime+'<br>最近检查：'+esc(state.lastCheckAt?new Date(state.lastCheckAt).toLocaleTimeString('zh-CN',{hour12:false}):'尚未检查')+'<br>上次验证成功：'+esc(state.lastSuccessAt?new Date(state.lastSuccessAt).toLocaleTimeString('zh-CN',{hour12:false}):'尚未验证')+'</p>';}
   let stale=$('#dataFreshness');if(!stale){stale=document.createElement('p');stale.id='dataFreshness';stale.className='help';$('#connectionBanner').after(stale);}stale.hidden=state.connected||!(state.jobs.length||state.technicalTests.length||state.assets.length);stale.textContent='当前显示上次读取的数据 · 待更新；连接恢复前暂停审核和推送。';
   updateReviewActions();
+  if(typeof updateLocalImportAccess==='function')updateLocalImportAccess();
 }
 function setConnection(ok,message,phase='error'){
   state.connected=ok;state.phase=ok?'connected':phase;const gpu=state.localGateway||state.executionTarget==='remote_gpu';const name=gpu?'GPU':'工作台';
@@ -46,7 +66,7 @@ async function api(path,options={},format='json',context=connectionContext()){
     const response=await fetch(context.base+path,{...options,headers:{Authorization:'Bearer '+context.token,...(options.body?{'Content-Type':'application/json'}:{}),...options.headers},cache:'no-store',signal:controller.signal});
     if(!currentContext(context))throw outdated();
     if(!response.ok){let body;try{body=await response.json();}catch{}if(!currentContext(context))throw outdated();const error=Object.assign(new Error(typeof body?.detail==='string'?body.detail:'服务请求失败（'+response.status+'）'),{httpStatus:response.status,connectivity:response.status===401||response.status>=500,uncertain:!readOnly&&response.status>=500});if(error.connectivity)connectionFailure(context,error,response.status);throw error;}
-    const value=format==='blob'?await response.blob():await response.json();if(!currentContext(context))throw outdated();return value;
+    const value=format==='headers'?(await response.body?.cancel(),true):format==='blob'?await response.blob():await response.json();if(!currentContext(context))throw outdated();return value;
   }catch(error){
     if(error.stale||error.httpStatus||error.uncertain)throw error;
     if(!currentContext(context))throw outdated();
@@ -59,7 +79,7 @@ async function readLocalSession(context){
   if(!response.ok)throw Object.assign(new Error('本机连接配置暂不可用，请等待下一次检查。'),{connectivity:true});
   const session=await response.json();if(!currentContext(context))throw staleRequest();
   if(session.local_gateway!==true||typeof session.token!=='string'||session.token.length<24)throw Object.assign(new Error('本机连接配置不完整，请检查启动程序。'),{connectivity:true});
-  nextEpoch();state.base=location.origin;state.token=session.token;state.localGateway=true;$('#connectionForm').hidden=true;runtimeSettings();
+  nextEpoch();state.base=location.origin;state.token=session.token;state.localGateway=true;state.mediaStreaming=session.media_streaming===true;$('#connectionForm').hidden=true;runtimeSettings();
 }
 function refresh(silent=false){
   if(!state.base||!state.token){if(!silent)showPage('settings');return Promise.resolve();}
@@ -84,7 +104,7 @@ function refresh(silent=false){
       $('#assetBadge').textContent=state.assets.length;$('#jobBadge').textContent=state.jobs.length;
       $('#serviceState').textContent=status.worker_running?(status.execution_target==='remote_gpu'?'远端 GPU 服务运行中':'本地服务运行中'):'工作线程未运行';$('#gpuState').textContent=status.gpu?.available?(status.gpu.name+' · '+Math.round(status.gpu.memory_mb/1024)+' GB'):'当前服务未检测到 GPU';
       $('#wecomState').textContent=status.delivery?.configured?(status.delivery.enabled?'已配置并启用':'已配置 · 尚未启用'):'待配置机器人';
-      $('#inboxPath').textContent=config.inbox;renderAssets();renderJobs();if(state.filter==='technical_test')refreshTechnicalTests(true);if(typeof refreshCollections==='function'&&$('#page-collections').classList.contains('active'))refreshCollections(true);
+      $('#remoteInboxPath').textContent=config.inbox;if(!state.localGateway)$('#inboxPath').textContent='当前连接远程素材库。请在这台电脑打开本地工作台，即可直接选择视频导入。';renderAssets();renderJobs();if(state.filter==='technical_test')refreshTechnicalTests(true);if(typeof refreshCollections==='function'&&$('#page-collections').classList.contains('active'))refreshCollections(true);
     }catch(error){if(currentContext(context))connectionFailure(context,error);if(!silent)reportError(error);}
   })().finally(()=>{if(state.refreshing===flight)state.refreshing=null;});
   return flight.promise;
@@ -110,41 +130,56 @@ function refreshTechnicalTests(silent=false){
 function selectJobFilter(filter){state.filter=filter;document.querySelectorAll('[data-filter]').forEach(button=>button.classList.toggle('active',button.dataset.filter===filter));renderJobs();return filter==='technical_test'?refreshTechnicalTests():Promise.resolve();}
 function renderAssets(){
   const selectedSource=$('#sourceSelect').value;
-  $('#sourceSelect').innerHTML='<option value="">选择一段素材</option>'+state.assets.map(a=>`<option value="${esc(a.source)}">${esc(a.source)}</option>`).join('');
+  $('#sourceSelect').innerHTML='<option value="">选择一段素材</option>'+state.assets.map(a=>`<option value="${esc(a.source)}">${esc(assetName(a))}</option>`).join('');
   if(state.assets.some(a=>a.source===selectedSource))$('#sourceSelect').value=selectedSource;
-  $('#assetsList').innerHTML=state.assets.length?state.assets.map(a=>`<article class="panel asset-card"><div class="asset-poster" aria-label="视频文件">▷</div><div class="asset-body"><h3>${esc(a.name)}</h3><p>${esc(a.source)}</p><div class="asset-footer"><span>${bytes(a.size)} · ${esc(a.extension?.slice(1).toUpperCase())}</span><button class="button subtle" data-source="${esc(a.source)}">开始剪辑 ↗</button></div></div></article>`).join(''):'<div class="empty panel"><span class="empty-icon">▱</span><strong>素材目录暂时为空</strong><p>把 MP4、MOV 等视频放入上方目录，再点击扫描。</p></div>';
+  $('#assetsList').innerHTML=state.assets.length?state.assets.map(a=>`<article class="panel asset-card"><button class="asset-poster" data-preview="${esc(a.source)}" aria-label="预览原片：${esc(assetName(a))}"><span>▷</span><small>预览原片</small></button><div class="asset-body"><h3>${esc(assetName(a))}</h3><p>${a.suggested_preset==='preserve'?'完整保留 · 适合包装与已有成片':'口播保守处理 · 另建版本时可调整'}</p><div class="asset-footer"><span>${bytes(a.size)} · ${esc(a.extension?.slice(1).toUpperCase())}</span><button class="button subtle" data-preview="${esc(a.source)}">另建剪辑版本 ↗</button></div></div></article>`).join(''):'<div class="empty panel"><span class="empty-icon">▱</span><strong>还没有已同步的视频</strong><p>先在上方选择本机视频。导入后会显示同步进度；同步完成后可在这里预览。</p></div>';
 }
 function newJob(source=''){
   if(!state.connected){showPage('settings');toast('先连接工作台，再创建剪辑任务。');return;}
   if(!state.assets.length){showPage('assets');toast('素材目录还是空的，先放入一段视频。');return;}
-  $('#sourceSelect').value=source;$('#jobTitle').value=source?source.split('/').pop().replace(/\.[^.]+$/,'')+' · 初剪':'';$('#jobDialog').showModal();
+  $('#sourceSelect').value=source;$('#jobTitle').value=source?assetName(state.assets.find(a=>a.source===source)).replace(/\.[^.]+$/,'')+' · 初剪':'';$('#editPreset').value=suggestedPreset(source);updatePresetHelp();$('#jobDialog').showModal();
+}
+async function previewSource(source){
+  if(!state.connected){toast('GPU 连接恢复后可以预览已同步的原片。',true);return;}
+  const context=connectionContext(),request=++sourcePreview.request;sourcePreview.source=source;
+  clearMediaElement($('#sourceVideo'));if(sourcePreview.blob)URL.revokeObjectURL(sourcePreview.blob);sourcePreview.blob=null;sourcePreview.url=null;
+  $('#sourceTitle').textContent=assetName(state.assets.find(a=>a.source===source));$('#sourceVideoStatus').textContent='正在读取原片，较大的视频需要一些时间…';$('#sourceVideoStatus').className='media-status';$('#sourceDetails').textContent='原片预览，不会修改素材。导入的素材会自动处理；如需调整参数，可另建剪辑版本。';updateReviewActions();if(!$('#sourceDialog').open)$('#sourceDialog').showModal();
+  try{const path='/api/assets/video?source='+encodeURIComponent(source);let url;if(canStreamMedia())url=mediaAddress(path);else{const blob=await api(path,{},'blob',context);if(request!==sourcePreview.request||!currentContext(context)||!$('#sourceDialog').open)return;sourcePreview.blob=URL.createObjectURL(blob);url=sourcePreview.blob;}sourcePreview.url=url;setMediaSource($('#sourceVideo'),$('#sourceVideoStatus'),url,()=>request===sourcePreview.request&&sourcePreview.source===source&&$('#sourceDialog').open,'原片已加载，点击播放查看。');if(!canStreamMedia())$('#sourceVideoStatus').textContent='原片已加载，点击播放查看。';}
+  catch(error){if(request===sourcePreview.request&&!error.stale){$('#sourceVideoStatus').textContent='原片加载失败。'+error.message;$('#sourceVideoStatus').className='media-status error';reportError(error);}}
 }
 async function review(id){
   const context=connectionContext(),request=++state.reviewRequest;
-  try{const data=await api('/api/jobs/'+id,{},'json',context);if(request!==state.reviewRequest||!currentContext(context))return;const j=data.job,technical=isTechnicalTest(j);state.selected=j;$('#reviewTitle').textContent=technical?'GPU 链路自测（彩条测试片）':j.title;
+  try{const data=await api('/api/jobs/'+id,{},'json',context);if(request!==state.reviewRequest||!currentContext(context))return;const j=data.job,technical=isTechnicalTest(j),reuseVideo=state.selected?.id===j.id&&state.selected?.video_url===j.video_url&&j.has_video&&state.videoSource;state.selected=j;$('#reviewTitle').textContent=technical?'GPU 链路自测（彩条测试片）':j.title;
     const warnings=[...(j.plan?.warnings||[]),...(j.result?.qc?.warnings||[])];
-    $('#reviewDetails').innerHTML=`<p><span class="status ${technical?'technical_test':esc(j.status)}">${technical?(j.result?.qc?.passed===true?'自测通过':'技术自测记录'):esc(statusNames[j.status]||j.status)}</span>　${technical?'测试输出':'预期成片'} ${time(j.plan?.duration)} · 保留 ${j.plan?.clips?.length||'—'} 段</p>${j.error?'<div class="note">'+esc(j.error)+'</div>':''}<details><summary>${technical?'查看技术检查记录':'剪辑记录与检查报告'}</summary><pre>${esc(JSON.stringify({...(technical?{原记录名称:j.title,源文件:j.source,自测原因:j.diagnostic_reason}:{}),检查:j.result?.qc||'尚未完成',提示:warnings,事件:j.events||[]},null,2))}</pre></details>`;
-    updateReviewActions();
-    $('#reviewVideo').pause();$('#reviewVideo').removeAttribute('src');$('#reviewVideo').hidden=!j.has_video;
-    if(state.videoBlob){URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;}
-    $('#reviewDialog').showModal();
-    if(j.has_video){
-      const blob=await api(j.video_url,{},'blob',context);if(request!==state.reviewRequest||!currentContext(context)||state.selected?.id!==id||!$('#reviewDialog').open)return;
-      state.videoBlob=URL.createObjectURL(blob);$('#reviewVideo').src=state.videoBlob;
+    $('#reviewDetails').innerHTML=`<p><span class="status ${technical?'technical_test':esc(j.status)}">${technical?(j.result?.qc?.passed===true?'自测通过':'技术自测记录'):esc(statusNames[j.status]||j.status)}</span>　${technical?'测试输出':'预期成片'} ${time(j.plan?.duration)} · 保留 ${j.plan?.clips?.length||'—'} 段</p>${j.error?'<div class="note">'+esc(j.error)+'</div>':''}${j.status==='failed'&&j.retry_block_reason?'<p class="help">'+esc(j.retry_block_reason)+'</p>':''}<details><summary>${technical?'查看技术检查记录':'剪辑记录与检查报告'}</summary><pre>${esc(JSON.stringify({...(technical?{原记录名称:j.title,源文件:j.source,自测原因:j.diagnostic_reason}:{}),检查:j.result?.qc||'尚未完成',提示:warnings,事件:j.events||[]},null,2))}</pre></details>`;
+    if(!reuseVideo){clearMediaElement($('#reviewVideo'));if(state.videoBlob){URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;}state.videoSource=null;}
+    $('#reviewVideo').hidden=!j.has_video;$('#reviewVideoStatus').className='media-status';$('#reviewVideoStatus').textContent=!j.has_video?'任务还没有可预览的视频。':reuseVideo?'视频已加载，播放位置保持不变。':'正在读取视频，较大的文件需要一些时间…';
+    updateReviewActions();if(!$('#reviewDialog').open)$('#reviewDialog').showModal();
+    if(reuseVideo)setMediaSource($('#reviewVideo'),$('#reviewVideoStatus'),state.videoSource,()=>request===state.reviewRequest&&state.selected?.id===id&&$('#reviewDialog').open,technical?'测试视频已加载，仅供技术检查。':'成片已加载，播放位置保持不变。',false);
+    if(j.has_video&&!reuseVideo){
+      let url;
+      if(canStreamMedia())url=mediaAddress(j.video_url);
+      else{const blob=await api(j.video_url,{},'blob',context);if(request!==state.reviewRequest||!currentContext(context)||state.selected?.id!==id||!$('#reviewDialog').open)return;state.videoBlob=URL.createObjectURL(blob);url=state.videoBlob;}
+      state.videoSource=url;setMediaSource($('#reviewVideo'),$('#reviewVideoStatus'),url,()=>request===state.reviewRequest&&state.selected?.id===id&&$('#reviewDialog').open,technical?'测试视频已加载，仅供技术检查。':'成片已加载，点击播放检查画面和声音。');if(!canStreamMedia())$('#reviewVideoStatus').textContent=technical?'测试视频已加载，仅供技术检查。':'成片已加载，点击播放检查画面和声音。';updateReviewActions();
     }
-  }catch(e){if(request===state.reviewRequest)reportError(e);}
+  }catch(e){if(request===state.reviewRequest){if(!e.stale&&$('#reviewDialog').open){$('#reviewVideoStatus').textContent='视频读取失败。'+e.message;$('#reviewVideoStatus').className='media-status error';}reportError(e);}}
 }
 document.querySelectorAll('[data-page]').forEach(el=>el.addEventListener('click',()=>showPage(el.dataset.page)));
 document.querySelectorAll('[data-goto]').forEach(el=>el.addEventListener('click',()=>showPage(el.dataset.goto)));
 document.querySelectorAll('[data-close]').forEach(el=>el.addEventListener('click',()=>$('#'+el.dataset.close).close()));
-$('#reviewDialog').addEventListener('close',()=>{state.reviewRequest++;$('#reviewVideo').pause();$('#reviewVideo').removeAttribute('src');state.selected=null;if(state.videoBlob)URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;updateReviewActions();});
+$('#reviewDialog').addEventListener('close',()=>{state.reviewRequest++;clearMediaElement($('#reviewVideo'));state.selected=null;if(state.videoBlob)URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;state.videoSource=null;updateReviewActions();});
+$('#sourceDialog').addEventListener('close',()=>{sourcePreview.request++;clearMediaElement($('#sourceVideo'));if(sourcePreview.blob)URL.revokeObjectURL(sourcePreview.blob);sourcePreview.blob=null;sourcePreview.url=null;sourcePreview.source=null;updateReviewActions();});
+$('#sourceStartButton').onclick=()=>{const source=sourcePreview.source;if(!source||!state.connected)return;$('#sourceDialog').close();newJob(source);};
+$('#downloadVideoButton').onclick=downloadReviewedVideo;
 $('#connectButton').onclick=()=>showPage('settings');$('#refreshButton').onclick=()=>refresh();$('#scanButton').onclick=()=>refresh();$('#newJobButton').onclick=()=>newJob();$('#newJobButton2').onclick=()=>newJob();
-document.addEventListener('click',event=>{const source=event.target.closest('[data-source]');if(source)newJob(source.dataset.source);const item=event.target.closest('[data-review]');if(item)review(item.dataset.review);});
+document.addEventListener('click',event=>{const source=event.target.closest('[data-source]');if(source)newJob(source.dataset.source);const preview=event.target.closest('[data-preview]');if(preview)previewSource(preview.dataset.preview);const item=event.target.closest('[data-review]');if(item)review(item.dataset.review);});
 document.querySelectorAll('[data-filter]').forEach(el=>el.addEventListener('click',()=>selectJobFilter(el.dataset.filter)));
-$('#sourceSelect').onchange=()=>{$('#jobTitle').value=$('#sourceSelect').value.split('/').pop().replace(/\.[^.]+$/,'')+' · 初剪';};
+$('#sourceSelect').onchange=()=>{const source=$('#sourceSelect').value;$('#jobTitle').value=source?assetName(state.assets.find(a=>a.source===source)).replace(/\.[^.]+$/,'')+' · 初剪':'';$('#editPreset').value=suggestedPreset(source);updatePresetHelp();};
+$('#editPreset').onchange=updatePresetHelp;
 $('#connectionForm').onsubmit=async event=>{event.preventDefault();try{let value=$('#apiBase').value.trim() || (localPage?location.origin:'');const u=new URL(value);if(u.username||u.password||u.search||u.hash||!['https:','http:'].includes(u.protocol))throw new Error('请使用不含账号、密钥或查询参数的服务地址。');if(u.protocol==='http:'&&!['localhost','127.0.0.1','[::1]'].includes(u.hostname))throw new Error('远程服务必须使用 HTTPS。');nextEpoch();state.base=u.origin;state.token=$('#apiToken').value.trim();state.reauthNeeded=false;state.reauthAttempted=false;setConnection(false,'正在检查服务连接。','checking');await refresh();if(state.connected){$('#apiToken').value='';showPage('overview');toast('工作台已连接。');}}catch(e){reportError(e);}};
-$('#disconnectButton').onclick=()=>{nextEpoch();state.token='';state.reauthNeeded=false;state.reauthAttempted=false;$('#apiToken').value='';state.selected=null;$('#reviewDialog').close();$('#reviewVideo').pause();$('#reviewVideo').removeAttribute('src');if(state.videoBlob)URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;state.jobs=[];state.technicalTests=[];state.technicalTestCount=0;state.technicalLoaded=false;state.assets=[];state.config={};if(typeof resetCollections==='function')resetCollections();setConnection(false,'已手动断开连接。','idle');renderAssets();renderJobs();['statAssets','statReview','statPublished','statActive','assetBadge','jobBadge'].forEach(id=>$('#'+id).textContent='—');$('#serviceState').textContent='尚未连接';$('#wecomState').textContent='待配置机器人';$('#inboxPath').textContent='连接服务后读取实际路径';toast('已断开连接，访问令牌已从当前页面清除。');};
-$('#jobForm').onsubmit=async event=>{event.preventDefault();const button=$('#submitJob');button.disabled=true;try{await api('/api/jobs',{method:'POST',body:JSON.stringify({source:$('#sourceSelect').value,title:$('#jobTitle').value,settings:{...presets[$('#editPreset').value],target_aspect:$('#aspect').value},idempotency_key:crypto.randomUUID()})});$('#jobDialog').close();await refresh();showPage('jobs');toast('任务已加入剪辑队列。');}catch(e){reportError(e);}finally{button.disabled=false;}};
+$('#disconnectButton').onclick=()=>{nextEpoch();$('#sourceDialog').close();state.token='';state.mediaStreaming=false;state.reauthNeeded=false;state.reauthAttempted=false;$('#apiToken').value='';state.selected=null;$('#reviewDialog').close();$('#reviewVideo').pause();$('#reviewVideo').removeAttribute('src');if(state.videoBlob)URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;state.videoSource=null;state.jobs=[];state.technicalTests=[];state.technicalTestCount=0;state.technicalLoaded=false;state.assets=[];state.config={};if(typeof resetCollections==='function')resetCollections();setConnection(false,'已手动断开连接。','idle');renderAssets();renderJobs();['statAssets','statReview','statPublished','statActive','assetBadge','jobBadge'].forEach(id=>$('#'+id).textContent='—');$('#serviceState').textContent='尚未连接';$('#wecomState').textContent='待配置机器人';$('#inboxPath').textContent='连接服务后读取实际路径';toast('已断开连接，访问令牌已从当前页面清除。');};
+$('#jobForm').onsubmit=async event=>{event.preventDefault();const button=$('#submitJob');button.disabled=true;try{const preserve=$('#editPreset').value==='preserve';await api('/api/jobs',{method:'POST',body:JSON.stringify({source:$('#sourceSelect').value,title:$('#jobTitle').value,settings:{...presets[$('#editPreset').value],target_aspect:preserve?'original':$('#aspect').value},idempotency_key:crypto.randomUUID()})});$('#jobDialog').close();await refresh();showPage('jobs');toast('任务已加入剪辑队列。');}catch(e){reportError(e);}finally{button.disabled=false;}};
+$('#retryJobButton').onclick=async()=>{if(!state.selected||isTechnicalTest(state.selected)||state.selected.can_retry!==true||state.selected.status!=='failed'||!state.connected||state.actionBusy)return;const id=state.selected.id;state.actionBusy=true;updateReviewActions();try{await api('/api/jobs/'+id+'/retry',{method:'POST'});$('#reviewDialog').close();await refresh();toast('任务已重新加入处理队列，不会自动发布。');}catch(e){reportError(e);}finally{state.actionBusy=false;updateReviewActions();}};
 $('#approveButton').onclick=async()=>{if(!state.selected||isTechnicalTest(state.selected)||!state.connected||state.actionBusy)return;const id=state.selected.id;state.actionBusy=true;updateReviewActions();try{await api('/api/jobs/'+id+'/approve',{method:'POST'});toast('审核已确认。');await refresh();if(state.connected)await review(id);}catch(e){reportError(e);}finally{state.actionBusy=false;updateReviewActions();}};
 $('#publishButton').onclick=async()=>{if(!state.selected||isTechnicalTest(state.selected)||!state.connected||state.actionBusy)return;const id=state.selected.id;state.actionBusy=true;updateReviewActions();try{await api('/api/jobs/'+id+'/publish',{method:'POST'});toast('企业微信已确认接收成片。');await refresh();if(state.connected)await review(id);}catch(e){reportError(e);}finally{state.actionBusy=false;updateReviewActions();}};
 $('#downloadPreset').onclick=()=>{const config={...presets.gentle,target_aspect:'original',encoder:'cpu',normalize_audio:true,remove_silence:true,crf:18,fps:30};const url=URL.createObjectURL(new Blob([JSON.stringify(config,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='cutflow-preset.json';a.click();URL.revokeObjectURL(url);toast('剪辑参数已下载，可用作观察器的参数文件。');};

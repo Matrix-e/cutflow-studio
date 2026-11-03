@@ -9,6 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import unquote
 
 from fastapi.testclient import TestClient
 
@@ -35,13 +36,39 @@ class APITests(unittest.TestCase):
     def create(self, **extra):
         return self.client.post("/api/jobs", headers=self.auth, json={"source": self.source.name, **extra})
 
-    def reviewed_job(self):
-        job = self.create().json()["job"]
+    def reviewed_job(self, **extra):
+        job = self.create(**extra).json()["job"]
         output = self.root / "data" / "renders" / (job["id"] + ".mp4")
         output.write_bytes(b"reviewed-render")
         self.app.state.store.transition(job["id"], ["queued"], "review", "fixture",
                                         output_path=str(output), result={"qc": {"passed": True}})
         return job["id"]
+
+    def test_video_download_header_uses_readable_chinese_title_and_keeps_range(self):
+        job_id = self.reviewed_job(title="汽车托管访谈 第一集")
+        response = self.client.get(f"/api/jobs/{job_id}/video", headers={**self.auth, "Range": "bytes=0-3"})
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.content, b"revi")
+        disposition = response.headers["content-disposition"]
+        self.assertTrue(disposition.startswith("inline;"))
+        self.assertEqual(unquote(disposition.split("filename*=utf-8''")[1]), "汽车托管访谈 第一集.mp4")
+        self.assertTrue((self.root / "data" / "renders" / (job_id + ".mp4")).is_file())
+        self.assertEqual(self.client.get(f"/api/jobs/{job_id}/video").status_code, 401)
+
+    def test_video_download_header_sanitizes_invalid_reserved_empty_and_long_titles(self):
+        job_id = self.reviewed_job()
+        cases = [("  汽车<>:\"/\\|?*\n\r\t\x7f\u202e访谈. ", "汽车访谈.mp4"),
+                 ("CON", "视频成片.mp4"), ("LPT1.txt", "视频成片.mp4"),
+                 (" . ", "视频成片.mp4"), ("", "视频成片.mp4"), ("课" * 150, "课" * 60 + ".mp4")]
+        for title, expected in cases:
+            with self.subTest(title=title):
+                with self.app.state.store.connection() as connection:
+                    connection.execute("UPDATE jobs SET title=? WHERE id=?", (title, job_id))
+                response = self.client.get(f"/api/jobs/{job_id}/video", headers=self.auth)
+                self.assertEqual(response.status_code, 200)
+                disposition = response.headers["content-disposition"]
+                self.assertEqual(unquote(disposition.split("filename*=utf-8''")[1]), expected)
+                self.assertEqual(response.content, b"reviewed-render")
 
     def test_health_is_public_but_api_requires_bearer(self):
         self.assertEqual(self.client.get("/api/health").status_code, 200)
