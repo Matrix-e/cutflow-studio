@@ -61,6 +61,7 @@ function updateProductionAccess(){
   }
   if(pending&&state.connected&&!production.uncertain&&!production.pollTimer&&!production.checking)scheduleScriptPoll();
   if(isPerson&&state.connected&&Date.now()-production.catalogAt>30000&&!production.catalogLoading)loadPresenterCatalog();
+  if(typeof scheduleCreatorAssetResolution==='function')scheduleCreatorAssetResolution();
   if(typeof renderCreatorReplacement==='function')renderCreatorReplacement();
 }
 function scriptMessage(text,error=false){$('#productionScriptStatus').textContent=text;$('#productionScriptStatus').className='script-status'+(error?' error':'');}

@@ -5,14 +5,14 @@ const localPage = ['127.0.0.1','localhost','[::1]'].includes(location.hostname);
 const state = {base:localPage ? location.origin : '', token:'', connected:false, jobs:[], technicalTests:[],technicalTestCount:0,technicalLoading:null,technicalLoaded:false,assets:[], config:{}, filter:'all', selected:null, videoBlob:null,videoSource:null,mediaStreaming:false,epoch:0,phase:'idle',lastCheckAt:null,lastSuccessAt:null,lastConnectionError:'',refreshing:null,requests:new Set(),localGateway:false,reauthNeeded:false,reauthAttempted:false,reviewRequest:0,actionBusy:false,toastKind:null};
 const statusNames = {queued:'排队中',withdrawn:'已撤回 · 草稿保留',analyzing:'分析素材',rendering:'渲染检查',review:'等待审核',approved:'已审核',publishing:'正在推送',published:'已推送',failed:'需要处理'};
 // A cached directory is useful for names, never proof that a source is missing.
-state.assetCatalog={status:'unconfirmed',base:'',epoch:-1,at:null,complete:false,revision:0,signature:null};
+state.assetCatalog={status:'unconfirmed',base:'',epoch:-1,at:null,complete:false,revision:0,round:0,signature:null};
 function assetCatalogUsable(){const catalog=state.assetCatalog;return state.connected&&catalog.status==='ready'&&catalog.base===state.base&&catalog.epoch===state.epoch;}
 function assetCatalogCurrent(){return assetCatalogUsable()&&state.assetCatalog.complete;}
 function acceptAssetCatalog(data,context){
   const old=state.assetCatalog,signature=JSON.stringify(data.assets);
   state.assetCatalog={status:'ready',base:context.base,epoch:context.epoch,at:Date.now(),
     complete:Number.isInteger(data.limit)&&data.limit>0&&data.assets.length<data.limit,
-    revision:old.revision+Number(old.base!==context.base||old.epoch!==context.epoch||old.signature!==signature),signature};
+    revision:old.revision+Number(old.base!==context.base||old.epoch!==context.epoch||old.signature!==signature),round:(old.round||0)+1,signature};
 }
 const presets = {gentle:{silence_min:0.9,padding:0.25,min_clip:0.5,remove_silence:true,normalize_audio:true},course:{silence_min:1.5,padding:0.4,min_clip:0.8,remove_silence:true,normalize_audio:true},compact:{silence_min:0.7,padding:0.2,min_clip:0.5,remove_silence:true,normalize_audio:true},preserve:{remove_silence:false,normalize_audio:true,target_aspect:'original'}};
 const sourcePreview={source:null,blob:null,url:null,request:0};
@@ -69,19 +69,25 @@ async function api(path,options={},format='json',context=connectionContext()){
   if(!currentContext(context))throw staleRequest();
   if(!context.base||!context.token)throw new Error('请先连接剪辑服务并填写工作台访问令牌。');
   const method=(options.method||'GET').toUpperCase();
-  const readOnly=['GET','HEAD'].includes(method),outdated=()=>readOnly?staleRequest():uncertainRequest();
+  // This exact POST only reads metadata. All other POSTs retain mutation semantics.
+  const assetLookup=method==='POST'&&path==='/api/assets/resolve';
+  const readOnly=['GET','HEAD'].includes(method)||assetLookup,outdated=()=>readOnly?staleRequest():uncertainRequest();
+  const lookupSignal=assetLookup?options.signal:null,requestCurrent=()=>currentContext(context)&&!lookupSignal?.aborted;
+  if(!requestCurrent())throw outdated();
   if(!readOnly&&!state.connected)throw Object.assign(new Error('连接尚未恢复，请先检查任务状态后再操作。'),{connectivity:true});
     const controller=new AbortController(),request={controller,readOnly};state.requests.add(request);const timeout=setTimeout(()=>controller.abort(),path.endsWith('/publish')?300000:format==='blob'?120000:path.startsWith('/api/presenters/import?')?60000:20000);
+  const cancelLookup=()=>controller.abort();lookupSignal?.addEventListener('abort',cancelLookup,{once:true});
   try{
     const response=await fetch(context.base+path,{...options,headers:{Authorization:'Bearer '+context.token,...(options.body?{'Content-Type':'application/json'}:{}),...options.headers},cache:'no-store',signal:controller.signal});
-    if(!currentContext(context))throw outdated();
-    if(!response.ok){let body;try{body=await response.json();}catch{}if(!currentContext(context))throw outdated();const error=Object.assign(new Error(typeof body?.detail==='string'?body.detail:'服务请求失败（'+response.status+'）'),{httpStatus:response.status,connectivity:response.status===401||response.status>=500,uncertain:!readOnly&&response.status>=500});if(error.connectivity)connectionFailure(context,error,response.status);throw error;}
-    const value=format==='headers'?(await response.body?.cancel(),true):format==='blob'?await response.blob():await response.json();if(!currentContext(context))throw outdated();return value;
+    if(!requestCurrent())throw outdated();
+    if(!response.ok){let body;try{body=await response.json();}catch{}if(!requestCurrent())throw outdated();const error=Object.assign(new Error(assetLookup?'已选素材信息暂未核对完成（'+response.status+'），请等待连接恢复或刷新素材。':typeof body?.detail==='string'?body.detail:'服务请求失败（'+response.status+'）'),{httpStatus:response.status,connectivity:response.status===401||response.status>=500,uncertain:!readOnly&&response.status>=500});if(error.connectivity)connectionFailure(context,error,response.status);throw error;}
+    const value=format==='headers'?(await response.body?.cancel(),true):format==='blob'?await response.blob():await response.json();if(!requestCurrent())throw outdated();return value;
   }catch(error){
+    if(lookupSignal?.aborted)throw staleRequest();
     if(error.stale||error.httpStatus||error.uncertain)throw error;
     if(!currentContext(context))throw outdated();
     const failure=Object.assign(new Error(!readOnly?'操作结果需核实，请查看任务记录；不会自动重复提交。':error.name==='AbortError'?'服务检查超时，正在等待连接恢复。':'无法完成服务请求，请等待连接检查。'),{connectivity:true,uncertain:!readOnly});connectionFailure(context,failure);throw failure;
-  }finally{clearTimeout(timeout);state.requests.delete(request);}
+  }finally{clearTimeout(timeout);lookupSignal?.removeEventListener('abort',cancelLookup);state.requests.delete(request);}
 }
 async function readLocalSession(context){
   const response=await fetch('/local-session',{headers:{'X-CutFlow-Local':'1'},cache:'no-store',signal:AbortSignal.timeout(4000)});

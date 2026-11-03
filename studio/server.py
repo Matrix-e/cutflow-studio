@@ -12,6 +12,8 @@ import json
 import os
 import re
 import shutil
+import sqlite3
+import stat as stat_mode
 import subprocess
 import threading
 import unicodedata
@@ -83,6 +85,20 @@ class NewJob(BaseModel):
     title: str = Field(default="", max_length=160)
     settings: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ResolveAssets(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    sources: list[Annotated[str, Field(strict=True, min_length=1, max_length=4096)]] = Field(min_length=1, max_length=12)
+
+    @field_validator('sources')
+    @classmethod
+    def relative_video_sources(cls, sources):
+        if len(sources) != len(set(sources)):
+            raise ValueError('素材编号不能重复')
+        for source in sources:
+            validate_asset_source_id(source)
+        return sources
 
 
 class CreationOptions(BaseModel):
@@ -205,22 +221,133 @@ def production_capabilities(script_supported=False):
             'narration_provider': state.get('provider'), 'narration_model': state.get('model')}
 
 
-def safe_source(inbox: Path, relative: str) -> Path:
+def source_candidate(relative: str) -> Path:
+    """Existing source path checks without consulting the filesystem."""
     # Reject Windows drive paths even when the server runs on Linux.
     if "\x00" in relative or re.match(r"^[a-zA-Z]:", relative):
         raise ValueError("素材路径必须相对于投递箱")
     candidate = Path(relative)
     if candidate.is_absolute() or ".." in candidate.parts or relative.startswith("\\"):
         raise ValueError("素材路径不能越过投递箱")
-    base = inbox.resolve()
+    return candidate
+
+
+def contained_source(base: Path, candidate: Path) -> Path:
+    """Resolve aliases and retain the existing inbox containment boundary."""
     resolved = (base / candidate).resolve()
     if not resolved.is_relative_to(base) or resolved == base:
         raise ValueError("素材路径不能越过投递箱")
+    return resolved
+
+
+def safe_source(inbox: Path, relative: str) -> Path:
+    candidate = source_candidate(relative)
+    base = inbox.resolve()
+    resolved = contained_source(base, candidate)
     if not resolved.is_file():
         raise ValueError("素材不存在，或仍未同步完成")
     if resolved.suffix.lower() not in MEDIA_EXTENSIONS:
         raise ValueError("暂不支持这种素材格式")
     return resolved
+
+
+def validate_asset_source_id(source: str) -> None:
+    """The resolver accepts the POSIX relative IDs emitted by /api/assets."""
+    source_candidate(source)
+    if ('\\' in source or ':' in source or
+            any(ord(char) < 32 or 127 <= ord(char) <= 159 or unicodedata.category(char) == 'Cs' for char in source)):
+        raise ValueError('素材编号必须是投递箱内的视频相对路径，不含地址、驱动器或控制字符')
+    parts = source.split('/')
+    if any(part in {'', '.', '..'} for part in parts):
+        raise ValueError('素材编号不能包含空目录、当前目录或上级目录')
+    if Path(source).suffix.lower() not in MEDIA_EXTENSIONS:
+        raise ValueError('素材编号必须使用支持的视频格式')
+    # Exclude Windows device/ADS aliases even when the GPU host is Linux.
+    if any(part.endswith((' ', '.')) or any(char in '<>"|?*' for char in part) or
+           re.fullmatch(r'CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]', part.split('.')[0].rstrip(' '), re.IGNORECASE)
+           for part in parts):
+        raise ValueError('素材编号包含不可跨平台使用的路径格式')
+
+
+def asset_metadata(source: str, info: os.stat_result) -> dict:
+    """One metadata shape for directory listings and explicit source lookup."""
+    path = Path(source)
+    return {'source': source, 'name': path.name, 'display_name': display_name(source),
+            'suggested_preset': import_mode(source), 'size': info.st_size,
+            'modified_ns': info.st_mtime_ns, 'modified_at': info.st_mtime,
+            'extension': path.suffix.lower()}
+
+
+def source_is_link(info: os.stat_result) -> bool:
+    return stat_mode.S_ISLNK(info.st_mode) or bool(
+        getattr(info, 'st_file_attributes', 0) & getattr(stat_mode, 'FILE_ATTRIBUTE_REPARSE_POINT', 0))
+
+
+def asset_inbox_identity(inbox: Path) -> tuple[int, int]:
+    info = inbox.lstat()
+    if source_is_link(info) or not stat_mode.S_ISDIR(info.st_mode):
+        raise ValueError('inbox_unavailable')
+    return info.st_dev, info.st_ino
+
+
+def same_asset_inbox(inbox: Path, identity: tuple[int, int]) -> bool:
+    try:
+        return asset_inbox_identity(inbox) == identity
+    except (OSError, ValueError):
+        return False
+
+
+def resolve_asset_metadata(inbox: Path, sources: list[str], diagnostics: set[str]) -> list[dict]:
+    """Read metadata only, with conservative absence evidence and no media reads."""
+    def outcome(source, status, reason, asset=None):
+        result = {'source': source, 'status': status, 'reason': reason}
+        if asset is not None:
+            result['asset'] = asset
+        return result
+
+    try:
+        identity = asset_inbox_identity(inbox)
+    except (OSError, ValueError):
+        return [outcome(source, 'unconfirmed', 'inbox_unavailable') for source in sources]
+    diagnostic_keys = {os.path.normcase(source) for source in diagnostics}
+    results = []
+    for source in sources:
+        if os.path.normcase(source) in diagnostic_keys:
+            results.append(outcome(source, 'unconfirmed', 'technical_test_excluded'))
+            continue
+        try:
+            current = inbox
+            parts = source.split('/')
+            for index, part in enumerate(parts):
+                current = current / part
+                info = current.lstat()
+                if source_is_link(info):
+                    results.append(outcome(source, 'unconfirmed', 'link_excluded'))
+                    break
+                if index < len(parts) - 1 and not stat_mode.S_ISDIR(info.st_mode):
+                    results.append(outcome(source, 'unconfirmed', 'not_a_directory'))
+                    break
+            else:
+                if not stat_mode.S_ISREG(info.st_mode):
+                    results.append(outcome(source, 'unconfirmed', 'not_a_regular_file'))
+                    continue
+                resolved = contained_source(inbox, source_candidate(source))
+                if resolved != current or not same_asset_inbox(inbox, identity):
+                    results.append(outcome(source, 'unconfirmed', 'source_changed'))
+                    continue
+                if os.path.normcase(resolved.relative_to(inbox).as_posix()) in diagnostic_keys:
+                    results.append(outcome(source, 'unconfirmed', 'technical_test_excluded'))
+                    continue
+                results.append(outcome(source, 'found', 'metadata_available', asset_metadata(source, info)))
+        except FileNotFoundError:
+            confirmed = same_asset_inbox(inbox, identity)
+            results.append(outcome(source, 'not_found' if confirmed else 'unconfirmed',
+                                   'source_not_found' if confirmed else 'inbox_unavailable'))
+        except PermissionError:
+            results.append(outcome(source, 'unconfirmed', 'permission_denied'))
+        except (OSError, ValueError, RuntimeError):
+            results.append(outcome(source, 'unconfirmed', 'source_unavailable'))
+    return results
 
 
 def job_source_snapshots(job: dict) -> list[dict]:
@@ -621,6 +748,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                 "idea_refinement_supported": ideas_worker.supported(),
                 "knowledge_supported": True,
                 "queue_withdrawal_supported": True,
+                "asset_resolution_supported": True,
                 "face_swap": {"ready": False, "reason": "原视频换脸尚未开通：还需确认换脸与人脸识别模型的商用授权，并完成本机视频验收。现有口播可使用换人物功能。"},
                 "production": production_capabilities(scripts_worker.supported())}
 
@@ -649,11 +777,17 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                 stat = checked.stat()
             except (ValueError, OSError):
                 continue
-            found.append({"source": relative, "name": path.name, "display_name": display_name(relative),
-                          "suggested_preset": import_mode(relative), "size": stat.st_size,
-                          "modified_ns": stat.st_mtime_ns, "modified_at": stat.st_mtime,
-                          "extension": path.suffix.lower()})
+            found.append(asset_metadata(relative, stat))
         return {"assets": sorted(found, key=lambda item: item["modified_ns"], reverse=True), "limit": 1000}
+
+    @app.post('/api/assets/resolve', dependencies=[Depends(authorize)])
+    def resolve_assets(body: ResolveAssets):
+        try:
+            diagnostics = store.technical_test_sources()
+        except (OSError, sqlite3.Error):
+            return {'results': [{'source': source, 'status': 'unconfirmed', 'reason': 'catalog_unavailable'}
+                                for source in body.sources], 'limit': 12}
+        return {'results': resolve_asset_metadata(inbox_path, body.sources, diagnostics), 'limit': 12}
 
     @app.get("/api/assets/video", dependencies=[Depends(authorize)])
     def asset_video(source: str = Query(min_length=1, max_length=4096)):

@@ -2,6 +2,7 @@
 const CREATOR_DRAFT='cutflow.creator.draft.v1';
 const creator={selected:[],assetLabels:{},uploads:new Map(),uploading:false,busy:false,resultId:null,requestId:null,requestBody:null,uncertain:false};
 const creatorReplacement={draft:null};
+const creatorAssetResolution={key:'',sequence:0,timer:null,controller:null,status:'idle',results:new Map(),revision:0,signature:null};
 const creatorFields=['creatorBrief','creatorTitle','creatorDuration','creatorAspect','creatorPace','creatorOriginalAudio','creatorMusic','creatorOpeningTitle'];
 function setDraftFieldValue(id,value){const field=$('#'+id),text=String(value??'');if(field.tagName==='SELECT'&&text&&![...field.options].some(option=>option.value===text)){const option=document.createElement('option');option.value=text;option.textContent='草稿设置：'+text;field.appendChild(option);}field.value=text;}
 function creatorInputLocked(){return creator.busy||creator.uncertain;}
@@ -22,6 +23,88 @@ function loadCreatorDraft(){
 function creatorFeedback(text,error=false){$('#creatorFeedback').textContent=text;$('#creatorFeedback').className='media-status'+(error?' error':'');}
 function creatorCatalogUsable(){return typeof assetCatalogUsable==='function'&&assetCatalogUsable()===true;}
 function creatorCatalogComplete(){return typeof assetCatalogCurrent==='function'&&assetCatalogCurrent()===true;}
+function creatorLocalImportsTrusted(){return typeof localImports!=='undefined'&&!localImports.loading&&!localImports.error&&typeof localImportAvailable==='function'&&localImportAvailable()&&localImports.token===state.token;}
+function creatorResolutionInputs(){
+  const imports=creatorLocalImportsTrusted()?localImports.items:[],associations=new Map();
+  for(const key of creator.selected.slice(0,12)){
+    const receipt=key.startsWith('l:')?imports.find(item=>'l:'+item.id===key&&item.status==='synced'):null;
+    const source=key.startsWith('s:')?key.slice(2):receipt?.remote_source;
+    if(typeof source==='string'&&source.length>0&&source.length<=4096)associations.set(key,source);
+  }
+  const sources=[...new Set([...associations.values()].filter(source=>!state.assets.some(asset=>asset.source===source)))].sort();
+  return {sources,associations};
+}
+function creatorResolutionDraftContext(inputs){
+  // A confirmed l: → s: identity mapping is the same source, not a new draft.
+  const p=typeof production==='undefined'?null:production;
+  return JSON.stringify({selected:creator.selected.map(key=>inputs.associations.has(key)?'s:'+inputs.associations.get(key):key),
+    fields:creatorFields.map(id=>$('#'+id).value),production:p?{mode:p.mode,kind:p.kind,portraitId:p.portraitId,parentId:p.parentId,parentTitle:p.parentTitle,revisionKind:p.revisionKind,referenceIds:p.referenceIds,
+      fields:productionFields.map(id=>productionChecks.has(id)?$('#'+id).checked:$('#'+id).value),consent:$('#presenterConsent').checked}:null});
+}
+function creatorResolutionSnapshot(){
+  const inputs=creatorResolutionInputs(),enabled=state.config.asset_resolution_supported===true&&creatorCatalogUsable();
+  const key=enabled&&inputs.sources.length?JSON.stringify([state.base,state.token,state.epoch,state.assetCatalog.round,inputs.sources,creatorResolutionDraftContext(inputs)]):'';
+  const matching=!!key&&key===creatorAssetResolution.key;
+  return {...inputs,key,enabled,status:matching?creatorAssetResolution.status:key?'pending':'idle',results:matching&&creatorAssetResolution.status==='ready'?creatorAssetResolution.results:new Map()};
+}
+function creatorResolutionPending(){const view=creatorResolutionSnapshot();return !!view.key&&['pending','loading'].includes(view.status);}
+function commitCreatorResolution(results,status){
+  const signature=JSON.stringify([...results.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([source,result])=>[source,result.status,result.asset||null]));
+  if(signature!==creatorAssetResolution.signature){creatorAssetResolution.signature=signature;creatorAssetResolution.revision++;}
+  creatorAssetResolution.results=results;creatorAssetResolution.status=status;
+}
+function scheduleCreatorAssetResolution(){
+  const view=creatorResolutionSnapshot();
+  if(view.key===creatorAssetResolution.key)return;
+  clearTimeout(creatorAssetResolution.timer);creatorAssetResolution.timer=null;
+  creatorAssetResolution.controller?.abort();creatorAssetResolution.controller=null;
+  creatorAssetResolution.sequence++;creatorAssetResolution.key=view.key;creatorAssetResolution.results=new Map();creatorAssetResolution.status=view.key?'pending':'idle';
+  if(!view.key)return;
+  const sequence=creatorAssetResolution.sequence;
+  // One query per exact directory round and draft context; rendering never retries it.
+  creatorAssetResolution.timer=setTimeout(()=>{creatorAssetResolution.timer=null;resolveCreatorAssets(view.key,sequence);},250);
+}
+function creatorResolutionBatches(sources){
+  const batches=[];let batch=[];const encoder=new TextEncoder();
+  for(const source of sources){
+    const next=[...batch,source];
+    if(encoder.encode(JSON.stringify({sources:next})).byteLength>60000&&batch.length){batches.push(batch);batch=[source];}else batch=next;
+  }
+  if(batch.length)batches.push(batch);return batches;
+}
+async function resolveCreatorAssets(key,sequence){
+  const active=()=>sequence===creatorAssetResolution.sequence&&key===creatorAssetResolution.key&&key===creatorResolutionSnapshot().key;
+  if(!active())return;
+  const context=connectionContext(),sources=creatorResolutionSnapshot().sources,results=new Map(),controller=new AbortController();
+  creatorAssetResolution.controller=controller;creatorAssetResolution.status='loading';
+  try{
+    renderCreatorMaterials();
+    for(const batch of creatorResolutionBatches(sources)){
+      if(!active()||!currentContext(context))return;
+      const response=await api('/api/assets/resolve',{method:'POST',body:JSON.stringify({sources:batch}),signal:controller.signal},'json',context);
+      if(!active()||!currentContext(context))return;
+      if(response?.limit!==12||!Array.isArray(response.results)||response.results.length>batch.length)throw new Error('素材核对结果不完整。');
+      const seen=new Set();
+      for(const entry of response.results){
+        if(!entry||!batch.includes(entry.source)||seen.has(entry.source)||!['found','not_found','unconfirmed'].includes(entry.status))throw new Error('素材核对结果不完整。');
+        seen.add(entry.source);
+        if(entry.status==='found'&&(!entry.asset||entry.asset.source!==entry.source||typeof entry.asset.name!=='string'||(entry.asset.display_name!=null&&typeof entry.asset.display_name!=='string')||!Number.isFinite(entry.asset.size)||entry.asset.size<0))throw new Error('素材信息尚未确认。');
+        results.set(entry.source,entry.status==='found'?{status:'found',asset:entry.asset}:{status:entry.status});
+      }
+      for(const source of batch)if(!seen.has(source))results.set(source,{status:'unconfirmed'});
+    }
+    if(active())commitCreatorResolution(results,'ready');
+  }catch{
+    // This is a read. A failed lookup never becomes an uncertain creation/publish.
+    if(active())commitCreatorResolution(new Map(),'failed');
+  }finally{
+    if(creatorAssetResolution.controller===controller)creatorAssetResolution.controller=null;
+    if(active()){
+      if(creatorAssetResolution.status==='loading')commitCreatorResolution(new Map(),'failed');
+      renderCreatorMaterials();
+    }
+  }
+}
 function creatorSourceLabel(key){
   if(key.startsWith('l:'))return '未记录原名（导入编号：'+key.slice(2)+')';
   return (key.replace(/^s:/,'').split(/[\\/]/).pop()||'未记录素材名称').replace(/--[a-f0-9]{16}(?=\.[^.]+$|$)/i,'').slice(0,240);
@@ -32,21 +115,23 @@ function creatorAssetLabels(pool=creatorPool()){
   return {...creator.assetLabels};
 }
 function creatorPool(){
-  const usable=creatorCatalogUsable(),pool=state.assets.map(asset=>({key:'s:'+asset.source,source:asset.source,name:asset.display_name||asset.name||creatorSourceLabel('s:'+asset.source),size:asset.size,ready:usable,labelKnown:usable,availability:usable?'ready':'pending_catalog',status:usable?'已同步 · 可制作':'素材目录待确认'}));
+  const usable=creatorCatalogUsable(),resolution=creatorResolutionSnapshot(),assets=new Map(state.assets.map(asset=>[asset.source,asset]));
+  for(const [source,result] of resolution.results)if(result.status==='found')assets.set(source,result.asset);
+  const pool=[...assets.values()].map(asset=>({key:'s:'+asset.source,source:asset.source,name:asset.display_name||asset.name||creatorSourceLabel('s:'+asset.source),size:asset.size,ready:usable,labelKnown:usable,availability:usable?'ready':'pending_catalog',status:usable?'已同步 · 可制作':'素材目录待确认'}));
   const imports=typeof localImports==='undefined'?[]:localImports.items;
-  const localTrusted=typeof localImports!=='undefined'&&!localImports.loading&&!localImports.error&&typeof localImportAvailable==='function'&&localImportAvailable()&&localImports.token===state.token;
+  const localTrusted=creatorLocalImportsTrusted();
   for(const item of imports){
     const asset=localTrusted&&typeof item.remote_source==='string'&&item.remote_source?pool.find(a=>a.ready&&a.source===item.remote_source):null,localKey='l:'+item.id;
     if(asset){if(creator.selected.includes(localKey))creator.assetLabels[asset.key]=(asset.name||creator.assetLabels[localKey]||item.name||creatorSourceLabel(asset.key)).slice(0,240);creator.selected=creator.selected.map(k=>k===localKey?asset.key:k);continue;}
-    const waiting=localTrusted&&usable&&item.status==='waiting_sync';
-    pool.unshift({key:localKey,name:item.name||creator.assetLabels[localKey]||creatorSourceLabel(localKey),size:item.size,source:null,ready:false,labelKnown:localTrusted,availability:waiting?'waiting_sync':'pending_import',status:!localTrusted?'本机导入记录待确认':!usable?'远端素材目录待确认':item.status==='synced'?'同步记录存在，远端素材待确认':waiting?'已上传 · 等待同步':'导入状态待确认'});
+    const waiting=localTrusted&&usable&&item.status==='waiting_sync',resolved=resolution.results.get(resolution.associations.get(localKey)),missing=resolved?.status==='not_found';
+    pool.unshift({key:localKey,name:item.name||creator.assetLabels[localKey]||creatorSourceLabel(localKey),size:item.size,source:null,ready:false,labelKnown:localTrusted,availability:missing?'missing':waiting?'waiting_sync':'pending_import',status:missing?'当前素材未找到 · 可在此位置替换':!localTrusted?'本机导入记录待确认':!usable?'远端素材目录待确认':item.status==='synced'?'同步记录存在，远端素材待确认':waiting?'已上传 · 等待同步':'导入状态待确认'});
   }
   for(const [id,item] of creator.uploads){if(!imports.some(i=>i.id===id))pool.unshift({key:'l:'+id,name:item.file.name,size:item.file.size,ready:false,labelKnown:true,availability:item.error?'import_error':'uploading',status:item.error?'导入需处理':item.status,retryId:item.error?id:null});}
   creator.selected=[...new Set(creator.selected)];return pool;
 }
 function creatorSelection(pool=creatorPool()){
-  const labels=creatorAssetLabels(pool),complete=creatorCatalogComplete();
-  return creator.selected.map(key=>{const item=pool.find(asset=>asset.key===key);if(item)return {...item,name:labels[key]||item.name};const missing=key.startsWith('s:')&&complete;return {key,name:labels[key]||creatorSourceLabel(key),ready:false,availability:missing?'missing':key.startsWith('l:')?'pending_import':'pending_catalog',status:missing?'当前素材库未找到 · 可在此位置替换':key.startsWith('l:')?'导入记录待确认 · 不代表素材已删除':'素材目录待确认 · 暂不判断缺失'};});
+  const labels=creatorAssetLabels(pool),resolution=creatorResolutionSnapshot();
+  return creator.selected.map(key=>{const item=pool.find(asset=>asset.key===key);if(item)return {...item,name:labels[key]||item.name};const missing=resolution.results.get(resolution.associations.get(key))?.status==='not_found';return {key,name:labels[key]||creatorSourceLabel(key),ready:false,availability:missing?'missing':key.startsWith('l:')?'pending_import':'pending_catalog',status:missing?'当前素材未找到 · 可在此位置替换':key.startsWith('l:')?'导入记录待确认 · 不代表素材已删除':resolution.status==='loading'||resolution.status==='pending'?'正在核对已选素材信息':resolution.status==='failed'?'素材核对暂未完成 · 刷新后再确认':'素材信息待确认 · 目录未列出不代表不存在'};});
 }
 function creatorMaterialReadiness(selected){
   const unresolved=selected.filter(item=>!item.ready);if(!unresolved.length)return '';
@@ -56,9 +141,10 @@ function creatorMaterialReadiness(selected){
 }
 function creatorReplacementLocked(){
   const p=typeof production==='undefined'?null:production,idea=typeof ideaAssistant==='undefined'?null:ideaAssistant;
-  return creatorInputLocked()||creator.uploading||(typeof localImports!=='undefined'&&localImports.busy)||!!(idea&&(idea.uncertain||idea.checking||idea.pending||['queued','running'].includes(idea.job?.status)))||!!(p&&(p.uploading||p.checking||p.uncertain||['queued','running'].includes(p.scriptJob?.status)));
+  return creatorInputLocked()||creator.uploading||creatorResolutionPending()||(typeof localImports!=='undefined'&&localImports.busy)||!!(idea&&(idea.uncertain||idea.checking||idea.pending||['queued','running'].includes(idea.job?.status)))||!!(p&&(p.uploading||p.checking||p.uncertain||['queued','running'].includes(p.scriptJob?.status)));
 }
 function renderCreatorMaterials(){
+  scheduleCreatorAssetResolution();
   const previousLabels=JSON.stringify([creator.selected,creator.assetLabels]);
   const pool=creatorPool(),query=$('#creatorAssetSearch').value.trim().toLowerCase(),shown=pool.filter(a=>a.name.toLowerCase().includes(query)),locked=creatorInputLocked(),replacementLocked=creatorReplacementLocked()||!creatorCatalogUsable();
   $('#creatorAssetGrid').innerHTML=shown.length?shown.map(item=>`<article class="creator-asset-card ${creator.selected.includes(item.key)?'selected':''}"><label><input type="checkbox" data-creator-select="${esc(item.key)}" ${creator.selected.includes(item.key)?'checked':''} ${locked?'disabled':''} aria-label="选择素材：${esc(item.name)}"><span><strong>${esc(item.name)}</strong><small>${bytes(item.size||0)} · ${esc(item.status)}</small></span></label><div class="creator-card-actions">${item.source?'<button type="button" class="text-button" data-preview="'+esc(item.source)+'" '+(!item.ready?'disabled':'')+'>预览</button>':''}${item.retryId?'<button type="button" class="text-button" data-creator-retry="'+esc(item.retryId)+'" '+(locked||creator.uploading?'disabled':'')+'>核对并重试导入</button>':''}</div></article>`).join(''):'<div class="creator-asset-empty">'+(query?'当前列表没有同名素材。':creatorCatalogComplete()?'还没有视频，点击上方「上传视频」。':creatorCatalogUsable()?'当前列表暂无素材，目录尚未完整读取。':'素材目录待确认，你可以先写下想法。')+'</div>';
@@ -68,6 +154,7 @@ function renderCreatorMaterials(){
   updateCreatorAccess();renderCreatorResult();
 }
 function updateCreatorAccess(){
+  scheduleCreatorAssetResolution();
   const selected=creatorSelection(),brief=$('#creatorBrief').value.trim(),waiting=selected.filter(a=>!a.ready).length;
   const supported=state.config.creation_supported===true,locked=creatorInputLocked();
   for(const id of creatorFields)$('#'+id).disabled=locked;
@@ -114,11 +201,12 @@ function openCreatorReplacement(index){
   if(creatorReplacementLocked()||!creatorCatalogUsable())return;
   const selected=creatorSelection(),original=selected[index];if(!Number.isInteger(index)||!original)return;
   ensureCreatorReplacementDialog();
-  creatorReplacement.draft={index,key:original.key,name:original.name,choice:null,base:state.base,token:state.token,epoch:state.epoch,revision:state.assetCatalog?.revision,context:creatorReplacementContext(),invalid:false};
+  creatorReplacement.draft={index,key:original.key,name:original.name,choice:null,base:state.base,token:state.token,epoch:state.epoch,revision:state.assetCatalog?.revision,resolutionRevision:creatorAssetResolution.revision,context:creatorReplacementContext(),invalid:false};
   renderCreatorReplacement();if(!$('#creatorReplacementDialog').open)$('#creatorReplacementDialog').showModal();
 }
 function creatorReplacementState(draft,pool){
-  if(draft.invalid||state.base!==draft.base||state.token!==draft.token||state.epoch!==draft.epoch||state.assetCatalog?.revision!==draft.revision||creator.selected[draft.index]!==draft.key||creatorReplacementContext()!==draft.context){draft.invalid=true;return {message:'素材目录、连接、原位置或草稿内容已经变化，请关闭窗口后重新选择。',candidates:[],blocked:true};}
+  if(draft.invalid||state.base!==draft.base||state.token!==draft.token||state.epoch!==draft.epoch||state.assetCatalog?.revision!==draft.revision||creatorAssetResolution.revision!==draft.resolutionRevision||creator.selected[draft.index]!==draft.key||creatorReplacementContext()!==draft.context){draft.invalid=true;return {message:'素材目录、核对结果、连接、原位置或草稿内容已经变化，请关闭窗口后重新选择。',candidates:[],blocked:true};}
+  if(creatorResolutionPending())return {message:'正在核对已选素材，确认完成后才能替换。原位置和候选选择保持不变。',candidates:[],blocked:true};
   if(creatorReplacementLocked())return {message:'当前正在上传、生成想法或讲稿、核对提交，暂不能替换。原选择保持不变。',candidates:[],blocked:true};
   if(!creatorCatalogUsable())return {message:'正在确认素材目录，请等待最新读取完成；不会使用未经确认的素材替换。',candidates:[],blocked:true};
   const candidates=pool.filter(item=>item.ready&&item.source&&!creator.selected.includes(item.key));
