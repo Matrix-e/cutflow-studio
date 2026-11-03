@@ -37,6 +37,13 @@ const workDrafts = (() => {
     }
     if (!Array.isArray(source.selected) || source.selected.length > 12 || source.selected.some(s =>
       typeof s !== 'string' || s.length > 4202 || !/^[sl]:./.test(s))) throw error('草稿的素材清单无效，未覆盖当前内容。');
+    const selected = [...new Set(source.selected)], assetLabels = {};
+    const suppliedLabels = source.assetLabels && typeof source.assetLabels === 'object' && !Array.isArray(source.assetLabels) ? source.assetLabels : {};
+    for (const key of selected) {
+      if (typeof suppliedLabels[key] !== 'string') continue;
+      const name = suppliedLabels[key].replace(/\\/g,'/').split('/').pop().replace(/[\u0000-\u001f\u007f]/g,'').trim().slice(0,240);
+      if (name) assetLabels[key] = name;
+    }
     if (!modes.has(p.mode) || !['public','personal'].includes(p.kind)) throw error('草稿的制作方式无效。');
     const portrait = p.portraitId == null ? null : text(p.portraitId,100);
     if (portrait && !/^[a-zA-Z0-9_-]+$/.test(portrait)) throw error('草稿的人物编号无效。');
@@ -46,7 +53,7 @@ const workDrafts = (() => {
     const parent = jobId(p.parentId), revision = p.revisionKind == null ? null : p.revisionKind;
     if (parent && !['rewrite','presenter','remix'].includes(revision) || !parent && revision != null)
       throw error('草稿的新版本关联不完整。');
-    return {creator:{selected:[...new Set(source.selected)],fields:creatorValues},production:{
+    return {creator:{selected,assetLabels,fields:creatorValues},production:{
       mode:p.mode,kind:p.kind,portraitId:portrait,preferredVoice:p.preferredVoice == null ? null : text(p.preferredVoice,160),
       voiceExplicit:p.voiceExplicit === true,fields:productionValues,referenceIds:[...new Set(refs)],
       parentId:parent,parentTitle:parent ? text(p.parentTitle,160) : null,revisionKind:revision}};
@@ -56,7 +63,8 @@ const workDrafts = (() => {
     for (const id of Object.keys(creatorLimits)) c[id] = field(id)?.value || '';
     for (const id of Object.keys(productionLimits)) p[id] = field(id)?.value || '';
     for (const id of checkFields) p[id] = field(id)?.checked === true;
-    return cleanSnapshot({creator:{selected:[...creator.selected],fields:c},production:{
+    const assetLabels = typeof creatorAssetLabels === 'function' ? creatorAssetLabels() : (creator.assetLabels || {});
+    return cleanSnapshot({creator:{selected:[...creator.selected],assetLabels,fields:c},production:{
       mode:production.mode,kind:production.kind,portraitId:production.portraitId,
       preferredVoice:production.preferredVoice,voiceExplicit:production.voiceExplicit,fields:p,
       referenceIds:[...(production.referenceIds || [])],parentId:production.parentId,
@@ -150,6 +158,7 @@ const workDrafts = (() => {
     production.checking=false;production.uncertain=false;
     creator.requestId=null;creator.requestBody=null;creator.resultId=null;creator.uncertain=false;
     creator.selected=[...snapshot.creator.selected];
+    creator.assetLabels={...snapshot.creator.assetLabels};
     for(const [id,value] of Object.entries(snapshot.creator.fields))if(field(id))setDraftFieldValue(id,value);
     const p=snapshot.production;
     for(const key of ['mode','kind','portraitId','preferredVoice','voiceExplicit','parentId','parentTitle','revisionKind'])production[key]=p[key];

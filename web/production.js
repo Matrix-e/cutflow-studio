@@ -57,10 +57,11 @@ function updateProductionAccess(){
     const tooLong=script.length>(isPerson?450:1500);
     $('#creatorGenerate').disabled=creator.busy||!state.connected||(!creator.uncertain&&(!cap?.ready||!ready||tooLong||!$('#creatorBrief').value.trim()||!voice.value||(!script&&(!caps.script_supported||pending||production.checking))));
     $('#creatorGenerate').textContent=creator.busy?'正在提交制作任务…':creator.uncertain?'核对并继续提交':!script?'先生成独白讲稿 →':'生成带声音的视频 →';
-    $('#creatorReadiness').textContent=creator.uncertain?'提交结果待核对，再次点击会查找同一任务。':tooLong?'当前讲稿有 '+script.length+' 字，'+(isPerson?'人物口播最多 450 字，请先精简讲稿。':'单条最多 1500 字，请先精简讲稿。'):!cap?.ready?cap?.reason||'生成服务正在准备。':!ready?isPerson?'先选择可用的人物形象。':'先选择已经同步完成的视频素材。':!script?'写好想法后先生成讲稿；也可以直接填写独白。':'将完整朗读当前讲稿 · 生成后进入成片审核';
+    $('#creatorReadiness').textContent=creator.uncertain?'提交结果待核对，再次点击会查找同一任务。':tooLong?'当前讲稿有 '+script.length+' 字，'+(isPerson?'人物口播最多 450 字，请先精简讲稿。':'单条最多 1500 字，请先精简讲稿。'):!cap?.ready?cap?.reason||'生成服务正在准备。':!ready?isPerson?'先选择可用的人物形象。':creatorMaterialReadiness(selected)||'先选择已经同步完成的视频素材。':!script?'写好想法后先生成讲稿；也可以直接填写独白。':'将完整朗读当前讲稿 · 生成后进入成片审核';
   }
   if(pending&&state.connected&&!production.uncertain&&!production.pollTimer&&!production.checking)scheduleScriptPoll();
   if(isPerson&&state.connected&&Date.now()-production.catalogAt>30000&&!production.catalogLoading)loadPresenterCatalog();
+  if(typeof renderCreatorReplacement==='function')renderCreatorReplacement();
 }
 function scriptMessage(text,error=false){$('#productionScriptStatus').textContent=text;$('#productionScriptStatus').className='script-status'+(error?' error':'');}
 function acceptScript(job,id){

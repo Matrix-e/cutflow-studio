@@ -63,6 +63,10 @@ async function applyWorkDraft(data,kind){
   if(typeof stashBeforeWorkVariant==='function')stashBeforeWorkVariant();
   production.mode=d.mode||'edit';production.parentId=data.parent_job_id||null;production.parentTitle=withdrawn?(data.parent_title||null):data.title;production.revisionKind=withdrawn?(data.revision_kind||null):kind;production.referenceIds=withdrawn?[...(data.reference_ids||[])]:[];production.scriptId=null;production.scriptJob=null;production.scriptBody=null;production.scriptContext=null;production.uncertain=false;clearTimeout(production.pollTimer);production.pollTimer=null;$('#productionScriptPreview').hidden=true;scriptMessage('');
   creator.selected=(data.sources||[]).map(s=>'s:'+s);creator.resultId=null;creator.requestId=null;creator.requestBody=null;creator.uncertain=false;$('#creatorBrief').value=d.brief||'';$('#creatorTitle').value=withdrawn?(data.title||''):'';$('#productionScript').value=d.spoken_script||'';$('#productionSubtype').value=d.subtype||'salon_promo';
+  creator.assetLabels=Object.fromEntries(creator.selected.map(key=>{
+    const name=key.slice(2).replace(/\\/g,'/').split('/').pop().replace(/--[0-9a-f]{16}(?=\.[^.]+$)/,'').replace(/[\u0000-\u001f\u007f]/g,'').trim().slice(0,240);
+    return [key,name];
+  }).filter(([,name])=>name));
   for(const [key,id] of Object.entries({target_duration:'creatorDuration',aspect:'creatorAspect',pace:'creatorPace',keep_original_audio:'creatorOriginalAudio',music:'creatorMusic',opening_title:'creatorOpeningTitle'}))setDraftFieldValue(id,production.mode==='edit'?(options[key]??''):'');
   for(const [key,id] of Object.entries({name:'productionBrand',cta:'productionCTA',event_date:'productionDate',event_place:'productionPlace'}))$('#'+id).value=d.brand?.[key]||'';
   for(const [key,id,fallback] of [['opening_title','productionOpeningTitle',''],['aspect','productionAspect','9:16'],['voice_style','productionStyle','professional'],['source_audio','productionSourceAudio','mute'],['target_duration','productionDuration',45]])setDraftFieldValue(id,options[key]??fallback);

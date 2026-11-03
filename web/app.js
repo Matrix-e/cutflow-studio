@@ -4,6 +4,16 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const localPage = ['127.0.0.1','localhost','[::1]'].includes(location.hostname);
 const state = {base:localPage ? location.origin : '', token:'', connected:false, jobs:[], technicalTests:[],technicalTestCount:0,technicalLoading:null,technicalLoaded:false,assets:[], config:{}, filter:'all', selected:null, videoBlob:null,videoSource:null,mediaStreaming:false,epoch:0,phase:'idle',lastCheckAt:null,lastSuccessAt:null,lastConnectionError:'',refreshing:null,requests:new Set(),localGateway:false,reauthNeeded:false,reauthAttempted:false,reviewRequest:0,actionBusy:false,toastKind:null};
 const statusNames = {queued:'排队中',withdrawn:'已撤回 · 草稿保留',analyzing:'分析素材',rendering:'渲染检查',review:'等待审核',approved:'已审核',publishing:'正在推送',published:'已推送',failed:'需要处理'};
+// A cached directory is useful for names, never proof that a source is missing.
+state.assetCatalog={status:'unconfirmed',base:'',epoch:-1,at:null,complete:false,revision:0,signature:null};
+function assetCatalogUsable(){const catalog=state.assetCatalog;return state.connected&&catalog.status==='ready'&&catalog.base===state.base&&catalog.epoch===state.epoch;}
+function assetCatalogCurrent(){return assetCatalogUsable()&&state.assetCatalog.complete;}
+function acceptAssetCatalog(data,context){
+  const old=state.assetCatalog,signature=JSON.stringify(data.assets);
+  state.assetCatalog={status:'ready',base:context.base,epoch:context.epoch,at:Date.now(),
+    complete:Number.isInteger(data.limit)&&data.limit>0&&data.assets.length<data.limit,
+    revision:old.revision+Number(old.base!==context.base||old.epoch!==context.epoch||old.signature!==signature),signature};
+}
 const presets = {gentle:{silence_min:0.9,padding:0.25,min_clip:0.5,remove_silence:true,normalize_audio:true},course:{silence_min:1.5,padding:0.4,min_clip:0.8,remove_silence:true,normalize_audio:true},compact:{silence_min:0.7,padding:0.2,min_clip:0.5,remove_silence:true,normalize_audio:true},preserve:{remove_silence:false,normalize_audio:true,target_aspect:'original'}};
 const sourcePreview={source:null,blob:null,url:null,request:0};
 const mediaListeners=new WeakMap();
@@ -35,14 +45,14 @@ function connectionContext(){return {base:state.base,token:state.token,epoch:sta
 function currentContext(context){return context.epoch===state.epoch&&context.base===state.base&&context.token===state.token;}
 function staleRequest(){return Object.assign(new Error('连接状态已变化，请以最新检查结果为准。'),{stale:true});}
 function uncertainRequest(){return Object.assign(new Error('操作结果需核实，请查看任务记录；不会自动重复提交。'),{uncertain:true});}
-function nextEpoch(){state.epoch++;for(const request of state.requests)if(request.readOnly)request.controller.abort();}
+function nextEpoch(){state.epoch++;state.assetCatalog.status='unconfirmed';for(const request of state.requests)if(request.readOnly)request.controller.abort();}
 function isTechnicalTest(job){return job?.job_kind==='technical_test';}
 function updateReviewActions(){if(typeof renderQueueDraftActions==='function')renderQueueDraftActions(state.selected);if(typeof renderWorkActions==='function')renderWorkActions(state.selected);if(typeof renderProductionProgress==='function')renderProductionProgress();if(typeof updateCompatibilityControls==='function')updateCompatibilityControls();const j=state.selected,technical=isTechnicalTest(j);$('#approveButton').disabled=technical||!state.connected||state.actionBusy||j?.status!=='review';$('#publishButton').disabled=technical||!state.connected||state.actionBusy||j?.status!=='approved'||!state.config.delivery?.enabled||!state.config.delivery?.configured;$('#reviewActions').hidden=technical;$('#reviewActions').style.display=technical?'none':'';$('#downloadVideoButton').hidden=technical;$('#downloadVideoButton').disabled=technical||!j?.has_video||!state.videoSource;$('#retryJobButton').hidden=technical||j?.can_retry!==true;$('#retryJobButton').disabled=!state.connected||state.actionBusy||j?.can_retry!==true;$('#technicalTestNotice').hidden=!technical;$('#reviewEyebrow').textContent=technical?'TECHNICAL TEST / 非正式成片':'FINAL REVIEW';$('#diagnosticReason').textContent=technical?(j.diagnostic_reason||'用于检查同步、GPU 编码和文件交付是否可用，不代表真实素材的剪辑效果。'):'';$('#reviewHelp').textContent=technical?'该测试记录仅供排查技术链路，不能作为成片下载、审核或推送到企业微信群。':'下载只保存视频，不会审核或发布。推送会发送到已配置的企业微信群；结果不确定时先核实，避免重复发送。';$('#sourceStartButton').disabled=!state.connected||!sourcePreview.source;}
 function runtimeSettings(){
   if(localPage){let note=$('#desktopConnectionStatus');if(!note){note=document.createElement('div');note.id='desktopConnectionStatus';note.className='note';$('#connectionForm').before(note);}const runtime=state.connected?'GPU 已连接':state.phase==='checking'?'GPU 连接中':state.phase==='error'?'GPU 连接异常':'GPU 待连接';note.innerHTML='<strong>本地页面已运行</strong><p>连接方式：'+(state.localGateway?'本地自动连接':'手动配置')+'<br>'+runtime+'<br>最近检查：'+esc(state.lastCheckAt?new Date(state.lastCheckAt).toLocaleTimeString('zh-CN',{hour12:false}):'尚未检查')+'<br>上次验证成功：'+esc(state.lastSuccessAt?new Date(state.lastSuccessAt).toLocaleTimeString('zh-CN',{hour12:false}):'尚未验证')+'</p>';}
   let stale=$('#dataFreshness');if(!stale){stale=document.createElement('p');stale.id='dataFreshness';stale.className='help';$('#connectionBanner').after(stale);}stale.hidden=state.connected||!(state.jobs.length||state.technicalTests.length||state.assets.length);stale.textContent='当前显示上次读取的数据 · 待更新；连接恢复前暂停审核和推送。';
   updateReviewActions();
-  if(typeof updateLocalImportAccess==='function')updateLocalImportAccess();if(typeof updateCreatorAccess==='function')updateCreatorAccess();
+  if(typeof updateLocalImportAccess==='function')updateLocalImportAccess();if(typeof renderCreatorMaterials==='function')renderCreatorMaterials();else if(typeof updateCreatorAccess==='function')updateCreatorAccess();
 }
 function setConnection(ok,message,phase='error'){
   state.connected=ok;state.phase=ok?'connected':phase;const gpu=state.localGateway||state.executionTarget==='remote_gpu';const name=gpu?'GPU':'工作台';
@@ -50,7 +60,7 @@ function setConnection(ok,message,phase='error'){
   if(!ok)$('#serviceState').textContent=phase==='checking'?'正在检查服务状态':phase==='error'?'连接异常 · 服务状态待更新':'尚未连接';
 }
 function connectionFailure(context,error,status=0){
-  if(!currentContext(context))return;nextEpoch();state.lastCheckAt=Date.now();state.lastConnectionError=error.message;
+  if(!currentContext(context))return;nextEpoch();state.assetCatalog.status='failed';state.lastCheckAt=Date.now();state.lastConnectionError=error.message;
   error.connectionEpoch=state.epoch;
   if(status===401&&state.localGateway&&!state.reauthAttempted)state.reauthNeeded=true;
   setConnection(false,error.message,'error');
@@ -85,6 +95,7 @@ function refresh(silent=false){
   if(!state.base||!state.token){if(!silent)showPage('settings');return Promise.resolve();}
   if(state.refreshing&&currentContext(state.refreshing.context))return state.refreshing.promise;
   const flight={context:connectionContext(),promise:null};state.refreshing=flight;
+  state.assetCatalog.status='refreshing';if(typeof renderCreatorMaterials==='function')renderCreatorMaterials();
   flight.promise=(async()=>{
     let context=flight.context;
     const reviewRevision=state.reviewRequest;
@@ -94,6 +105,7 @@ function refresh(silent=false){
       const [status,assets,jobs,config]=await Promise.all([api('/api/status',{},'json',context),api('/api/assets',{},'json',context),api('/api/jobs',{},'json',context),api('/api/config',{},'json',context)]);
       if(!currentContext(context))return;
       if(typeof status?.worker_running!=='boolean'||typeof status?.execution_target!=='string'||!Array.isArray(assets?.assets)||!Array.isArray(jobs?.jobs)||typeof config?.inbox!=='string'||!assets.assets.every(a=>a&&typeof a.source==='string')||!jobs.jobs.every(j=>j&&typeof j.id==='string'&&typeof j.status==='string'))throw Object.assign(new Error('服务返回的数据不完整，等待重新检查。'),{connectivity:true});
+      acceptAssetCatalog(assets,context);
       state.assets=assets.assets;state.jobs=jobs.jobs.filter(j=>!isTechnicalTest(j));state.technicalTestCount=Number.isInteger(status.technical_test_count)&&status.technical_test_count>=0?status.technical_test_count:0;state.config=config;state.executionTarget=status.execution_target;state.lastCheckAt=Date.now();state.lastSuccessAt=state.lastCheckAt;state.reauthAttempted=false;
       const latest=state.selected&&state.jobs.find(j=>j.id===state.selected.id);
       const refreshOpenReview=latest&&$('#reviewDialog').open&&reviewRevision===state.reviewRequest&&(
