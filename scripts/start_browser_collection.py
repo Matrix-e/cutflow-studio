@@ -43,9 +43,9 @@ def browser_launch(env: dict, *, once=False, login_only=False):
     return command, child_env, profile, output
 
 
-def gpu_ready(client, token: str) -> bool:
+def gpu_ready(client, token: str, *, timeout: float = 8) -> bool:
     try:
-        response = client.get(API_URL + "/api/status", headers={"Authorization": "Bearer " + token})
+        response = client.get(API_URL + "/api/status", headers={"Authorization": "Bearer " + token}, timeout=timeout)
         if response.status_code != 200:
             return False
         return response.json().get("execution_target") == "remote_gpu"
@@ -56,34 +56,42 @@ def gpu_ready(client, token: str) -> bool:
 def ensure_gpu(env: dict, token: str, *, wait_seconds: float = 45) -> bool:
     import httpx
     data = Path(env.get("CUTFLOW_DATA", str(ROOT / "data")))
-    with httpx.Client(timeout=3, trust_env=False, follow_redirects=False) as client:
-        if gpu_ready(client, token):
+    budget = min(45.0, max(0.0, float(wait_seconds)))
+    if not budget:
+        return False
+    deadline = time.monotonic() + budget
+    with httpx.Client(timeout=8, trust_env=False, follow_redirects=False) as client:
+        if gpu_ready(client, token, timeout=min(8, budget)):
             return True
+        if time.monotonic() >= deadline:
+            return False
         data.mkdir(parents=True, exist_ok=True)
         # start_gpu.py owns a process lock; a competing launch reuses its bridge.
         with (data / "gpu-browser-connector.log").open("a", encoding="utf-8") as log:
             process = subprocess.Popen([sys.executable, str(ROOT / "scripts" / "start_gpu.py"), "--no-browser"],
                                        cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
-        deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
-            if gpu_ready(client, token):
+            if gpu_ready(client, token, timeout=min(8, max(0.1, deadline-time.monotonic()))):
                 return True
-            if process.poll() is not None:
-                return False
-            time.sleep(1)
+            # A competing launcher may exit while the incumbent tunnel recovers.
+            # Reap its status but continue checking the actual authenticated API.
+            process.poll()
+            remaining = deadline-time.monotonic()
+            if remaining > 0:
+                time.sleep(min(1, remaining))
     return False
 
 
 def _lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    stream = path.open("a+b")
-    stream.seek(0)
-    if not stream.read(1):
-        stream.write(b"0")
-        stream.flush()
-    stream.seek(0)
+    stream = None
     try:
+        stream = path.open("a+b")
+        if os.fstat(stream.fileno()).st_size == 0:
+            stream.write(b"0")
+            stream.flush()
+        stream.seek(0)
         if os.name == "nt":
             import msvcrt
             msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
@@ -92,7 +100,8 @@ def _lock(path: Path):
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return stream
     except OSError:
-        stream.close()
+        if stream is not None:
+            stream.close()
         return None
 
 

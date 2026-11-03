@@ -9,9 +9,32 @@ import subprocess
 import sys
 import time
 import webbrowser
-from start_local import environment
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.start_local import environment
+
+
+def acquire_lock(path):
+    """Inspect size without reading another Windows process's locked byte."""
+    stream = None
+    try:
+        stream = path.open('a+b')
+        if os.fstat(stream.fileno()).st_size == 0:
+            stream.write(b'0')
+            stream.flush()
+        stream.seek(0)
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return stream
+    except OSError:
+        if stream is not None:
+            stream.close()
+        return None
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description='连接远程 GPU 工作台并自动同步素材')
@@ -42,23 +65,13 @@ def main(argv=None):
     base='http://127.0.0.1:8766'
     headers={'Authorization':'Bearer '+token}
     data.mkdir(parents=True,exist_ok=True)
-    lock=(data/'gpu-client.lock').open('a+b')
-    lock.seek(0)
-    if not lock.read(1):
-        lock.write(b'0');lock.flush()
-    lock.seek(0)
-    try:
-        if os.name=='nt':
-            import msvcrt
-            msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1)
-        else:
-            import fcntl
-            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    except OSError:
-        lock.close()
-        with httpx.Client(timeout=4,trust_env=False) as client:
+    lock=acquire_lock(data/'gpu-client.lock')
+    if lock is None:
+        with httpx.Client(timeout=8,trust_env=False,follow_redirects=False) as client:
             response=client.get(base+'/api/status',headers=headers)
             response.raise_for_status()
+            if response.json().get('execution_target') != 'remote_gpu':
+                raise RuntimeError('已有端口不是已认证的 GPU 工作台，未复用。')
         if not args.no_browser:
             webbrowser.open(base+'/#token='+token)
         print('GPU 连接器已经在运行，已复用。')

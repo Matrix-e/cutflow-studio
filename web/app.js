@@ -79,5 +79,25 @@ $('#approveButton').onclick=async()=>{if(!state.selected)return;const id=state.s
 $('#publishButton').onclick=async()=>{if(!state.selected)return;const id=state.selected.id;$('#publishButton').disabled=true;try{await api('/api/jobs/'+id+'/publish',{method:'POST'});toast('企业微信已确认接收成片。');await refresh();await review(id);}catch(e){toast(e.message,true);await refresh(true);}};
 $('#downloadPreset').onclick=()=>{const config={...presets.gentle,target_aspect:'original',encoder:'cpu',normalize_audio:true,remove_silence:true,crf:18,fps:30};const url=URL.createObjectURL(new Blob([JSON.stringify(config,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='cutflow-preset.json';a.click();URL.revokeObjectURL(url);toast('剪辑参数已下载，可用作观察器的参数文件。');};
 const fragment=new URLSearchParams(location.hash.slice(1));if(localPage&&fragment.get('token')){state.token=fragment.get('token');history.replaceState(null,'',location.pathname);}
-$('#apiBase').value=state.base;renderJobs();if(state.token)refresh(true);
+async function connectDesktop(){
+  if(localPage){
+    try{
+      const result=await fetch('/local-session',{headers:{'X-CutFlow-Local':'1'},cache:'no-store',signal:AbortSignal.timeout(4000)});
+      if(result.ok){
+        const session=await result.json();
+        if(session.local_gateway===true&&typeof session.token==='string'&&session.token.length>=24){
+          state.base=location.origin;state.token=session.token;state.localGateway=true;
+          $('#connectionForm').hidden=true;
+          const info=document.createElement('div');info.className='note';info.innerHTML='<strong>已启用本地自动连接</strong><p>网站在这台电脑上运行，剪辑由远端 GPU 完成。访问凭据由本机程序管理，无需填写。</p>';
+          $('#connectionForm').before(info);
+          const access=$('.local-access');access.innerHTML='<strong>下次如何打开？</strong><p>双击「打开本地工作台.cmd」，即可启动网站并连接 GPU。</p><a class="text-button" href="http://127.0.0.1:8767/">本地工作台：127.0.0.1:8767 ↗</a>';
+          document.title='商剪工坊 · 本地工作台';
+        }
+      }
+    }catch{}
+  }
+  $('#apiBase').value=state.base;
+  if(state.token)await refresh(true);
+}
+$('#apiBase').value=state.base;renderJobs();connectDesktop();
 setInterval(()=>{if(state.connected&&!document.hidden&&!$('#jobDialog').open)refresh(true);},8000);
