@@ -399,12 +399,12 @@ test('MTS files are available in the picker and accepted by client validation',a
   assert.match(html,/accept="[^"]*\.mts/);assert.match(html,/M4V、MTS/);
 });
 
-test('synced material copy distinguishes automatic processing from an optional new edit version',async()=>{
+test('library cards clearly select material for the creator without creating jobs',async()=>{
   const h=await setup();h.configure();h.app.renderAssets();
-  assert.match(html,/同步后自动处理；也可预览原片或另建版本/);
-  assert.match(html,/用这段素材另建剪辑版本/);
-  assert.match(h.elements.get('assetsList').innerHTML,/另建剪辑版本/);
-  assert.match(html,/id="newJobButton">＋ 新建剪辑/);
-  assert.match(html,/id="newJobButton2">＋ 新建剪辑/);
+  assert.match(html,/只入库，选择素材后再生成/);
+  assert.match(html,/选择这段素材，写下想法/);
+  assert.match(h.elements.get('assetsList').innerHTML,/data-add-to-creator="source.mp4"/);
+  assert.match(html,/id="newJobButton">＋ 开始制作/);
+  assert.match(html,/id="newJobButton2">＋ 开始制作/);
   assert.equal(h.calls.length,0);
 });

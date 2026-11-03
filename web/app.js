@@ -27,7 +27,7 @@ function downloadReviewedVideo(){if(!state.selected||isTechnicalTest(state.selec
 let toastTimer;
 function toast(message,error=false,kind=null){state.toastKind=kind||(error&&message===state.lastConnectionError?'connection':'business');$('#toast').textContent=message;$('#toast').className='toast visible'+(error?' error':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>{$('#toast').className='toast';state.toastKind=null;},6500);}
 function reportError(error){if(error.stale||(!error.uncertain&&error.connectionEpoch!==undefined&&error.connectionEpoch!==state.epoch))return;toast(error.message,true,error.uncertain?'operation-uncertain':error.connectivity?'connection':'business');}
-function showPage(name){document.querySelectorAll('.page').forEach(el=>el.classList.toggle('active',el.id==='page-'+name));document.querySelectorAll('.nav').forEach(el=>el.classList.toggle('active',el.dataset.page===name));$('#pageTitle').textContent=({overview:'制作总览',assets:'素材库',jobs:'剪辑与审核',settings:'连接与设置',collections:'关键词采集'})[name] || '制作总览';if(name==='collections'&&typeof refreshCollections==='function')refreshCollections(true);if(name==='assets'&&typeof refreshLocalLibrary==='function')refreshLocalLibrary(true);}
+function showPage(name){document.body?.classList.toggle('creating',name==='create');if(name==='create'&&typeof renderCreatorMaterials==='function')renderCreatorMaterials();document.querySelectorAll('.page').forEach(el=>el.classList.toggle('active',el.id==='page-'+name));document.querySelectorAll('.nav').forEach(el=>el.classList.toggle('active',el.dataset.page===name));$('#pageTitle').textContent=({create:'开始制作',overview:'运行状态',assets:'素材库',jobs:'剪辑与审核',settings:'连接与设置',collections:'关键词采集'})[name] || '制作总览';if(name==='collections'&&typeof refreshCollections==='function')refreshCollections(true);if(name==='assets'&&typeof refreshLocalLibrary==='function')refreshLocalLibrary(true);}
 function bytes(n){return n>=1073741824?(n/1073741824).toFixed(2)+' GB':(n/1048576).toFixed(1)+' MB';}
 function time(s){return Number.isFinite(Number(s))?Number(s).toFixed(1)+' 秒':'—';}
 function date(s){return s?new Date(typeof s==='number'?s*1000:s).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'';}
@@ -42,7 +42,7 @@ function runtimeSettings(){
   if(localPage){let note=$('#desktopConnectionStatus');if(!note){note=document.createElement('div');note.id='desktopConnectionStatus';note.className='note';$('#connectionForm').before(note);}const runtime=state.connected?'GPU 已连接':state.phase==='checking'?'GPU 连接中':state.phase==='error'?'GPU 连接异常':'GPU 待连接';note.innerHTML='<strong>本地页面已运行</strong><p>连接方式：'+(state.localGateway?'本地自动连接':'手动配置')+'<br>'+runtime+'<br>最近检查：'+esc(state.lastCheckAt?new Date(state.lastCheckAt).toLocaleTimeString('zh-CN',{hour12:false}):'尚未检查')+'<br>上次验证成功：'+esc(state.lastSuccessAt?new Date(state.lastSuccessAt).toLocaleTimeString('zh-CN',{hour12:false}):'尚未验证')+'</p>';}
   let stale=$('#dataFreshness');if(!stale){stale=document.createElement('p');stale.id='dataFreshness';stale.className='help';$('#connectionBanner').after(stale);}stale.hidden=state.connected||!(state.jobs.length||state.technicalTests.length||state.assets.length);stale.textContent='当前显示上次读取的数据 · 待更新；连接恢复前暂停审核和推送。';
   updateReviewActions();
-  if(typeof updateLocalImportAccess==='function')updateLocalImportAccess();
+  if(typeof updateLocalImportAccess==='function')updateLocalImportAccess();if(typeof updateCreatorAccess==='function')updateCreatorAccess();
 }
 function setConnection(ok,message,phase='error'){
   state.connected=ok;state.phase=ok?'connected':phase;const gpu=state.localGateway||state.executionTarget==='remote_gpu';const name=gpu?'GPU':'工作台';
@@ -110,7 +110,7 @@ function refresh(silent=false){
   return flight.promise;
 }
 function jobRows(jobs){return jobs.map(j=>{const technical=isTechnicalTest(j),title=technical?'GPU 链路自测（彩条测试片）':j.title,label=technical?(j.result?.qc?.passed===true?'自测通过':'技术自测记录'):(statusNames[j.status]||j.status);return `<div class="job-row"><span class="job-icon">${technical?'⚙':'▷'}</span><div class="job-info"><b>${esc(title)}</b><small>${technical?'技术自测 · 非正式成片 · ':''}${esc(date(j.created_at))}${technical?'':' · '+esc(j.source)}</small></div><span class="status ${technical?'technical_test':esc(j.status)}">${esc(label)}</span><button class="button subtle" data-review="${esc(j.id)}">${technical?'查看自测记录':j.has_video?'查看':'详情'}</button></div>`;}).join('');}
-function renderJobs(){
+function renderJobs(){if(typeof renderCreatorResult==='function')renderCreatorResult();
   const technical=state.filter==='technical_test',production=state.jobs.filter(j=>!isTechnicalTest(j));
   const filtered=technical?state.technicalTests:production.filter(j=>state.filter==='all'||j.status===state.filter);
   const intro=technical?'<div class="note"><strong>技术自测（非成片）</strong><p>以下是保留的链路检查记录，不计入正式任务或成片数量，不提供审核与推送操作。</p></div>':'';
@@ -128,11 +128,11 @@ function refreshTechnicalTests(silent=false){
   return flight.promise;
 }
 function selectJobFilter(filter){state.filter=filter;document.querySelectorAll('[data-filter]').forEach(button=>button.classList.toggle('active',button.dataset.filter===filter));renderJobs();return filter==='technical_test'?refreshTechnicalTests():Promise.resolve();}
-function renderAssets(){
+function renderAssets(){if(typeof renderCreatorMaterials==='function')renderCreatorMaterials();
   const selectedSource=$('#sourceSelect').value;
   $('#sourceSelect').innerHTML='<option value="">选择一段素材</option>'+state.assets.map(a=>`<option value="${esc(a.source)}">${esc(assetName(a))}</option>`).join('');
   if(state.assets.some(a=>a.source===selectedSource))$('#sourceSelect').value=selectedSource;
-  $('#assetsList').innerHTML=state.assets.length?state.assets.map(a=>`<article class="panel asset-card"><button class="asset-poster" data-preview="${esc(a.source)}" aria-label="预览原片：${esc(assetName(a))}"><span>▷</span><small>预览原片</small></button><div class="asset-body"><h3>${esc(assetName(a))}</h3><p>${a.suggested_preset==='preserve'?'完整保留 · 适合包装与已有成片':'口播保守处理 · 另建版本时可调整'}</p><div class="asset-footer"><span>${bytes(a.size)} · ${esc(a.extension?.slice(1).toUpperCase())}</span><button class="button subtle" data-preview="${esc(a.source)}">另建剪辑版本 ↗</button></div></div></article>`).join(''):'<div class="empty panel"><span class="empty-icon">▱</span><strong>还没有已同步的视频</strong><p>先在上方选择本机视频。导入后会显示同步进度；同步完成后可在这里预览。</p></div>';
+  $('#assetsList').innerHTML=state.assets.length?state.assets.map(a=>`<article class="panel asset-card"><button class="asset-poster" data-preview="${esc(a.source)}" aria-label="预览原片：${esc(assetName(a))}"><span>▷</span><small>预览原片</small></button><div class="asset-body"><h3>${esc(assetName(a))}</h3><p>${a.suggested_preset==='preserve'?'完整保留 · 适合包装与已有成片':'可用于制作 · 在开始制作中组合使用'}</p><div class="asset-footer"><span>${bytes(a.size)} · ${esc(a.extension?.slice(1).toUpperCase())}</span><button class="button subtle" data-add-to-creator="${esc(a.source)}">选择这段素材 ＋</button></div></div></article>`).join(''):'<div class="empty panel"><span class="empty-icon">▱</span><strong>还没有已同步的视频</strong><p>先在上方选择本机视频。导入后会显示同步进度；同步完成后可在这里预览。</p></div>';
 }
 function newJob(source=''){
   if(!state.connected){showPage('settings');toast('先连接工作台，再创建剪辑任务。');return;}
@@ -149,7 +149,7 @@ async function previewSource(source){
 }
 async function review(id){
   const context=connectionContext(),request=++state.reviewRequest;
-  try{const data=await api('/api/jobs/'+id,{},'json',context);if(request!==state.reviewRequest||!currentContext(context))return;const j=data.job,technical=isTechnicalTest(j),reuseVideo=state.selected?.id===j.id&&state.selected?.video_url===j.video_url&&j.has_video&&state.videoSource;state.selected=j;$('#reviewTitle').textContent=technical?'GPU 链路自测（彩条测试片）':j.title;
+  try{const data=await api('/api/jobs/'+id,{},'json',context);if(request!==state.reviewRequest||!currentContext(context))return;const j=data.job,technical=isTechnicalTest(j),reuseVideo=state.selected?.id===j.id&&state.selected?.video_url===j.video_url&&j.has_video&&state.videoSource;state.selected=j;if(typeof renderCreationReview==='function')renderCreationReview(j);$('#reviewTitle').textContent=technical?'GPU 链路自测（彩条测试片）':j.title;
     const warnings=[...(j.plan?.warnings||[]),...(j.result?.qc?.warnings||[])];
     $('#reviewDetails').innerHTML=`<p><span class="status ${technical?'technical_test':esc(j.status)}">${technical?(j.result?.qc?.passed===true?'自测通过':'技术自测记录'):esc(statusNames[j.status]||j.status)}</span>　${technical?'测试输出':'预期成片'} ${time(j.plan?.duration)} · 保留 ${j.plan?.clips?.length||'—'} 段</p>${j.error?'<div class="note">'+esc(j.error)+'</div>':''}${j.status==='failed'&&j.retry_block_reason?'<p class="help">'+esc(j.retry_block_reason)+'</p>':''}<details><summary>${technical?'查看技术检查记录':'剪辑记录与检查报告'}</summary><pre>${esc(JSON.stringify({...(technical?{原记录名称:j.title,源文件:j.source,自测原因:j.diagnostic_reason}:{}),检查:j.result?.qc||'尚未完成',提示:warnings,事件:j.events||[]},null,2))}</pre></details>`;
     if(!reuseVideo){if(typeof resetCompatibilityPreview==='function')resetCompatibilityPreview();clearMediaElement($('#reviewVideo'));if(state.videoBlob){URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;}state.videoSource=null;}
@@ -169,9 +169,9 @@ document.querySelectorAll('[data-goto]').forEach(el=>el.addEventListener('click'
 document.querySelectorAll('[data-close]').forEach(el=>el.addEventListener('click',()=>$('#'+el.dataset.close).close()));
 $('#reviewDialog').addEventListener('close',()=>{state.reviewRequest++;clearMediaElement($('#reviewVideo'));state.selected=null;if(state.videoBlob)URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;state.videoSource=null;updateReviewActions();});
 $('#sourceDialog').addEventListener('close',()=>{sourcePreview.request++;clearMediaElement($('#sourceVideo'));if(sourcePreview.blob)URL.revokeObjectURL(sourcePreview.blob);sourcePreview.blob=null;sourcePreview.url=null;sourcePreview.source=null;updateReviewActions();});
-$('#sourceStartButton').onclick=()=>{const source=sourcePreview.source;if(!source||!state.connected)return;$('#sourceDialog').close();newJob(source);};
+$('#sourceStartButton').onclick=()=>{const source=sourcePreview.source;if(!source||!state.connected)return;$('#sourceDialog').close();if(typeof addSourceToCreator==='function')addSourceToCreator(source);else newJob(source);};
 $('#downloadVideoButton').onclick=downloadReviewedVideo;
-$('#connectButton').onclick=()=>showPage('settings');$('#refreshButton').onclick=()=>refresh();$('#scanButton').onclick=()=>refresh();$('#newJobButton').onclick=()=>newJob();$('#newJobButton2').onclick=()=>newJob();
+$('#connectButton').onclick=()=>showPage('settings');$('#refreshButton').onclick=()=>refresh();$('#scanButton').onclick=()=>refresh();$('#newJobButton').onclick=()=>typeof openCreator==='function'?openCreator():newJob();$('#newJobButton2').onclick=()=>typeof openCreator==='function'?openCreator():newJob();
 document.addEventListener('click',event=>{const source=event.target.closest('[data-source]');if(source)newJob(source.dataset.source);const preview=event.target.closest('[data-preview]');if(preview)previewSource(preview.dataset.preview);const item=event.target.closest('[data-review]');if(item)review(item.dataset.review);});
 document.querySelectorAll('[data-filter]').forEach(el=>el.addEventListener('click',()=>selectJobFilter(el.dataset.filter)));
 $('#sourceSelect').onchange=()=>{const source=$('#sourceSelect').value;$('#jobTitle').value=source?assetName(state.assets.find(a=>a.source===source)).replace(/\.[^.]+$/,'')+' · 初剪':'';$('#editPreset').value=suggestedPreset(source);updatePresetHelp();};

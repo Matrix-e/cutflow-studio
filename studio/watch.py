@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .sync import candidate_files, stable_hash
-from .profiles import display_name, effective_settings
+from .profiles import display_name, effective_settings, import_mode
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts"}
 
@@ -127,7 +127,9 @@ class Watcher:
                 continue
             relative = path.relative_to(self.inbox).as_posix()
             seen.add(relative)
-            if relative in diagnostic_sources:
+            # Library imports wait for an explicit selection and generation
+            # request. Their original video still syncs normally over SFTP.
+            if relative in diagnostic_sources or import_mode(relative) == "library":
                 continue
             try:
                 stat = path.stat()
@@ -200,6 +202,11 @@ class Watcher:
         results = []
         for row in records:
             key, job_id = row["request_key"], row["job_id"]
+            if import_mode(row["source"]) == "library":
+                # Also stop an older watcher row from a mixed-version rollout;
+                # upload-only media must never advance approval/publication.
+                self._mark(key, "blocked", "library_requires_generation")
+                continue
             try:
                 response = self._request("GET", f"/api/jobs/{job_id}")
                 if response.status_code != 200:

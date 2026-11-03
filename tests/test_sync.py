@@ -62,6 +62,18 @@ class SyncTests(unittest.TestCase):
         second = self.agent.scan(self.transport)[0]
         self.assertNotEqual(first["destination"], second["destination"])
 
+    def test_library_mode_directory_survives_sync_unchanged(self):
+        source = self.root / '工作台导入/library/abc/待选择.mp4'
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b'video-library')
+        self.agent.scan(self.transport)
+        self.now = 15
+        result = self.agent.scan(self.transport)[0]
+        self.assertEqual(result['path'], '工作台导入/library/abc/待选择.mp4')
+        self.assertTrue(result['destination'].startswith('/root/autodl-tmp/cutflow/inbox/工作台导入/library/abc/待选择--'))
+        self.assertEqual(self.agent.scan(self.transport), [])
+        self.assertTrue(source.is_file())
+
     def test_dry_run_and_failed_send_do_not_mark_synced(self):
         (self.root / "a.mp4").write_bytes(b"video")
         self.agent.scan(self.transport)

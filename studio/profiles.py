@@ -10,7 +10,7 @@ import re
 
 
 IMPORT_ROOT = "工作台导入"
-IMPORT_MODES = frozenset({"gentle", "preserve"})
+IMPORT_MODES = frozenset({"gentle", "preserve", "library"})
 
 
 def import_mode(source: str) -> str | None:

@@ -25,6 +25,28 @@ class DiagnosticSourceConflict(StateConflict):
 class Store:
     JSON_FIELDS = {"settings", "plan", "result", "publication"}
 
+    @staticmethod
+    def source_names(source: str, settings: dict) -> set[str]:
+        names = {source}
+        creation = settings.get('creation') if isinstance(settings, dict) else None
+        if isinstance(creation, dict):
+            for item in creation.get('sources', []):
+                if isinstance(item, dict) and isinstance(item.get('source'), str):
+                    names.add(item['source'])
+        return names
+
+    @classmethod
+    def _diagnostic_sources(cls, conn) -> set[str]:
+        names = set()
+        for row in conn.execute("SELECT source,settings FROM jobs WHERE job_kind='technical_test'"):
+            names.update(cls.source_names(row['source'], json.loads(row['settings'])))
+        return names
+
+    @classmethod
+    def _check_diagnostic_sources(cls, conn, source: str, settings: dict):
+        if cls.source_names(source, settings) & cls._diagnostic_sources(conn):
+            raise DiagnosticSourceConflict("所选素材包含已登记的技术测试，不能进入正式剪辑或发布流程")
+
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,7 +140,7 @@ class Store:
     def technical_test_sources(self) -> set[str]:
         """Only explicitly registered diagnostics; never infer from filenames."""
         with self.connection() as conn:
-            return {row["source"] for row in conn.execute("SELECT DISTINCT source FROM jobs WHERE job_kind='technical_test'")}
+            return self._diagnostic_sources(conn)
 
     def mark_technical_test(self, job_id: str, reason: str):
         """Internal administrative classification; retains media and audit evidence.
@@ -149,8 +171,7 @@ class Store:
                source_size: int, source_mtime_ns: int, idempotency_key: str | None = None):
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if conn.execute("SELECT 1 FROM jobs WHERE source=? AND job_kind='technical_test' LIMIT 1",(source,)).fetchone():
-                raise DiagnosticSourceConflict("该素材已登记为技术测试，不能进入正式剪辑队列")
+            self._check_diagnostic_sources(conn, source, settings)
             if idempotency_key:
                 previous = conn.execute("SELECT * FROM jobs WHERE idempotency_key=?", (idempotency_key,)).fetchone()
                 if previous:
@@ -186,6 +207,8 @@ class Store:
                 raise StateConflict(f"当前状态 {row['status']} 不允许此操作")
             if row["job_kind"] == "technical_test" and status in {"queued","analyzing","rendering","approved","publishing","published"}:
                 raise StateConflict("技术测试记录仅供排查，不能审批、重新剪辑或发布为正式视频")
+            if status in {"queued", "analyzing", "rendering", "approved", "publishing"}:
+                self._check_diagnostic_sources(conn, row['source'], json.loads(row['settings']))
             timestamp = now()
             changes = {"status": status, "updated_at": timestamp, **fields}
             values = [json.dumps(v, ensure_ascii=False) if k in self.JSON_FIELDS and v is not None else v

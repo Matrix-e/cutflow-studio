@@ -15,6 +15,7 @@ import subprocess
 import uuid
 
 from .media import INPUT_OPTIONS
+from .profiles import IMPORT_MODES
 
 MAX_BYTES = 2 * 1024**3
 SPACE_RESERVE = 64 * 1024**2
@@ -33,8 +34,8 @@ def validate_input(identifier: str, name: str, mode: str):
             raise ValueError()
     except (ValueError, AttributeError):
         raise ImportProblem('导入编号无效，请重新选择文件。') from None
-    if mode not in {'gentle', 'preserve'}:
-        raise ImportProblem('请选择口播精剪或保留完整。')
+    if mode not in IMPORT_MODES:
+        raise ImportProblem('请选择素材入库、口播精剪或保留完整。')
     if (not name or len(name) > 180 or name.startswith(('.', '~')) or name.endswith((' ', '.'))
             or any(ord(c) < 32 or c in '<>:"/\\|?*' for c in name)
             or re.fullmatch(r'(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])', name.split('.')[0], re.I)

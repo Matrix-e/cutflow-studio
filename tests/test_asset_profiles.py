@@ -18,8 +18,10 @@ class ProfileTests(unittest.TestCase):
     def test_only_exact_root_profile_components_select_a_mode(self):
         self.assertEqual(import_mode("工作台导入/preserve/id/source.mp4"), "preserve")
         self.assertEqual(import_mode("工作台导入/gentle/id/source.mp4"), "gentle")
+        self.assertEqual(import_mode("工作台导入/library/id/source.mp4"), "library")
         for source in ("backup/工作台导入/preserve/id/source.mp4", "工作台导入/preserve-old/id/source.mp4",
-                       "工作台导入/Preserve/id/source.mp4", "工作台导入/preserve/source.mp4", "preserve/source.mp4"):
+                       "工作台导入/Preserve/id/source.mp4", "工作台导入/preserve/source.mp4", "preserve/source.mp4",
+                       "backup/工作台导入/library/id/source.mp4", "工作台导入/library-old/id/source.mp4"):
             self.assertIsNone(import_mode(source), source)
 
     def test_preserve_keeps_encoder_but_cannot_inherit_cut_ranges_or_resize(self):
@@ -29,7 +31,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(result, {"encoder": "nvenc", "remove_silence": False, "normalize_audio": True,
                                   "target_aspect": "original", "crf": 19})
         self.assertIn("source_ranges", original)
-        for source in ("ordinary.mp4", "工作台导入/gentle/id/source.mp4"):
+        for source in ("ordinary.mp4", "工作台导入/gentle/id/source.mp4", "工作台导入/library/id/source.mp4"):
             self.assertEqual(effective_settings(source, original), original)
 
     def test_sync_suffix_is_removed_only_from_display_name(self):
@@ -161,6 +163,24 @@ class AssetProfileAPITests(unittest.TestCase):
             rows = con.execute("SELECT * FROM submissions").fetchall()
         self.assertEqual(len(rows), 1)
         self.assertEqual(json.loads(rows[0]["settings"]), jobs[0]["settings"])
+
+    def test_library_remains_selectable_but_watcher_only_processes_legacy_preserve(self):
+        library_file = self.inbox / '工作台导入/library/abc/待选择--0123456789abcdef.mp4'
+        library_file.parent.mkdir(parents=True)
+        library_file.write_bytes(b'library-video')
+        relative = library_file.relative_to(self.inbox).as_posix()
+        for start in (0, 40):
+            watch = Watcher(self.inbox, self.root / 'watch', 'http://127.0.0.1:8765', 'profile-test', client=self.client)
+            watch.tick(now=start)
+            watch.tick(now=start + 15)
+        jobs = self.app.state.store.list()
+        self.assertEqual([job['source'] for job in jobs], [self.relative])
+        assets = self.client.get('/api/assets', headers=self.auth).json()['assets']
+        self.assertIn(relative, [asset['source'] for asset in assets])
+        explicit = self.client.post('/api/jobs', headers=self.auth,
+                                    json={'source': relative, 'settings': {'remove_silence': False}})
+        self.assertEqual(explicit.status_code, 201, explicit.text)
+        self.assertFalse(explicit.json()['job']['settings']['remove_silence'])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required")
     def test_preserve_import_renders_full_duration_with_silence_and_unchanged_source(self):

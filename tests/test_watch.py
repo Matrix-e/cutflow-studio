@@ -75,6 +75,32 @@ class WatchTests(unittest.TestCase):
         watch.tick(now=45)
         self.assertFalse(any(path.endswith(("/approve","/publish")) for _,path in self.calls))
 
+    def test_library_uploads_never_enqueue_even_with_auto_publish_enabled(self):
+        self.source.unlink()
+        library_file = self.inbox / '工作台导入/library/a/素材.mp4'
+        library_file.parent.mkdir(parents=True)
+        library_file.write_bytes(b'video')
+        for start in (0, 40):
+            watch = self.watcher(automatic=True)
+            watch.tick(now=start)
+            watch.tick(now=start + 15)
+        self.assertEqual(self.calls, [])
+        with watch.connection() as con:
+            self.assertEqual(con.execute('SELECT COUNT(*) FROM submissions').fetchone()[0], 0)
+        self.assertTrue(library_file.is_file())
+
+    def test_old_library_submission_never_advances_automatic_approval(self):
+        self.source.unlink()
+        watch = self.watcher(automatic=True)
+        with watch.connection() as con:
+            con.execute("INSERT INTO submissions(request_key,source,sha256,settings,status,job_id,updated_at,owned_by_request) VALUES(?,?,?,?,?,?,?,?)",
+                        ('old-library', '工作台导入/library/id/素材.mp4', 'hash', '{}', 'submitted', 'old-job', 0, 1))
+        watch.tick(now=0)
+        self.assertEqual(self.calls, [])
+        with watch.connection() as con:
+            row = con.execute("SELECT publish_state,error FROM submissions WHERE request_key='old-library'").fetchone()
+        self.assertEqual(tuple(row), ('blocked', 'library_requires_generation'))
+
     def test_manual_active_job_is_not_automatically_approved(self):
         app = create_app(data_dir=self.root / "server-data",inbox=self.inbox,token="test",start_worker=False)
         with TestClient(app) as client:

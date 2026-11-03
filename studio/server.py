@@ -17,16 +17,16 @@ import threading
 import unicodedata
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from . import __version__
-from .store import StateConflict, Store
+from .store import DiagnosticSourceConflict, StateConflict, Store
 from .collection_service import register_collection_routes
 from .profiles import display_name, import_mode
 from .preview import PreviewManager, PreviewError
@@ -79,6 +79,40 @@ class NewJob(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class CreationOptions(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    target_duration: float | None = Field(default=None, ge=1, le=3600, allow_inf_nan=False)
+    aspect: Literal['original', '16:9', '9:16', '1:1'] = 'original'
+    keep_original_audio: StrictBool = True
+    pace: Literal['preserve', 'gentle', 'compact'] = 'preserve'
+    opening_title: str = Field(default='', max_length=120)
+    music: StrictBool = False
+
+    @field_validator('target_duration', mode='before')
+    @classmethod
+    def numeric_duration(cls, value):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError('目标时长必须是秒数')
+        return value
+
+
+class NewCreation(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    sources: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(min_length=1, max_length=12)
+    brief: str = Field(min_length=1, max_length=3000)
+    title: str = Field(default='', max_length=160)
+    options: CreationOptions = Field(default_factory=CreationOptions)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+    @field_validator('brief', 'idempotency_key')
+    @classmethod
+    def nonempty_text(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError('想法和请求编号不能为空')
+        return value
+
+
 def safe_source(inbox: Path, relative: str) -> Path:
     # Reject Windows drive paths even when the server runs on Linux.
     if "\x00" in relative or re.match(r"^[a-zA-Z]:", relative):
@@ -97,6 +131,47 @@ def safe_source(inbox: Path, relative: str) -> Path:
     return resolved
 
 
+def job_source_snapshots(job: dict) -> list[dict]:
+    creation = (job.get('settings') or {}).get('creation')
+    if creation is not None:
+        if (not isinstance(creation, dict) or creation.get('version') != 1
+                or not isinstance(creation.get('sources'), list) or not 1 <= len(creation['sources']) <= 12):
+            raise ValueError('创作任务的素材记录不完整，请重新创建任务')
+        return creation['sources']
+    return [{'source': job['source'], 'size': job['source_size'], 'mtime_ns': job['source_mtime_ns']}]
+
+
+def validate_job_sources(job: dict, inbox: Path, store: Store) -> list[Path]:
+    paths = []
+    diagnostics = store.technical_test_sources()
+    for snapshot in job_source_snapshots(job):
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get('source'), str):
+            raise ValueError('创作任务的素材记录不完整，请重新创建任务')
+        path = safe_source(inbox, snapshot['source'])
+        if path.relative_to(inbox).as_posix() in diagnostics:
+            raise DiagnosticSourceConflict('所选素材包含已登记的技术测试，不能用于正式创作')
+        stat = path.stat()
+        if ((stat.st_size, stat.st_mtime_ns) != (snapshot.get('size'), snapshot.get('mtime_ns'))
+                or 'ctime_ns' in snapshot and stat.st_ctime_ns != snapshot['ctime_ns']):
+            raise ValueError('素材已变化，请新建任务以保留原有剪辑记录：' + display_name(snapshot['source']))
+        paths.append(path)
+    return paths
+
+
+def creation_plan_for_ui(job: dict, creation: dict) -> dict:
+    plan = job.get('plan') or creation.get('interpretation') or {}
+    interpretation = creation.get('interpretation') or {}
+    warnings = list(dict.fromkeys([*interpretation.get('warnings', []), *plan.get('warnings', []),
+                                   *(job.get('result') or {}).get('warnings', [])]))
+    result = {'resolved': plan.get('resolved', interpretation.get('resolved', {})),
+              'summary': plan.get('summary', interpretation.get('summary', '')),
+              'warnings': warnings, 'source_count': len(creation['sources']),
+              'stage': 'planned' if job.get('plan') else 'interpreted'}
+    if 'duration' in plan:
+        result['duration'] = plan['duration']
+    return result
+
+
 def retry_block_reason(job: dict, inbox: Path, store: Store) -> str | None:
     """One authoritative check shared by UI capability hints and retry writes."""
     if job["job_kind"] == "technical_test":
@@ -106,12 +181,9 @@ def retry_block_reason(job: dict, inbox: Path, store: Store) -> str | None:
     if job.get("publication") is not None or any(event["status"] == "publishing" for event in store.events(job["id"])):
         return "发布失败或发送结果未知的任务不能用此按钮重试，请先核实企业微信"
     try:
-        source = safe_source(inbox, job["source"])
-        stat = source.stat()
+        validate_job_sources(job, inbox, store)
     except (ValueError, OSError) as exc:
         return str(exc) if isinstance(exc, ValueError) else "素材暂时无法读取，请检查投递箱"
-    if (stat.st_size, stat.st_mtime_ns) != (job["source_size"], job["source_mtime_ns"]):
-        return "素材已变化，请新建任务以保留原有剪辑记录"
     return None
 
 
@@ -124,6 +196,12 @@ def public_job(job: dict, *, inbox: Path, store: Store) -> dict:
     result["retry_block_reason"] = retry_block_reason(job, inbox, store)
     result["can_retry"] = result["retry_block_reason"] is None
     result["preview_supported"] = True
+    creation = (job.get('settings') or {}).get('creation')
+    if isinstance(creation, dict):
+        result['brief'] = creation['brief']
+        result['sources'] = [entry['source'] for entry in creation['sources']]
+        result['creation_plan'] = creation_plan_for_ui(job, creation)
+        result['creation_warnings'] = result['creation_plan']['warnings']
     return result
 
 
@@ -179,18 +257,23 @@ class Worker:
 
     def process(self, job: dict):
         try:
-            path = safe_source(self.inbox, job["source"])
-            stat = path.stat()
-            if stat.st_size != job["source_size"] or stat.st_mtime_ns != job["source_mtime_ns"]:
-                raise ValueError("素材在排队后发生变化，请等同步完成后重新建任务")
-            media = importlib.import_module("studio.media")
+            paths = validate_job_sources(job, self.inbox, self.store)
             settings = dict(job["settings"])
-            if settings.get("srt_path"):
-                settings["srt_path"] = str(safe_subtitle(self.inbox, settings["srt_path"]))
-            plan = media.build_plan(str(path), settings)
+            creation = settings.pop('creation', None)
+            if creation is not None:
+                media = importlib.import_module('studio.creative')
+                plan = media.build_creation_plan([str(path) for path in paths], creation['brief'], creation['options'], settings)
+            else:
+                media = importlib.import_module("studio.media")
+                if settings.get("srt_path"):
+                    settings["srt_path"] = str(safe_subtitle(self.inbox, settings["srt_path"]))
+                plan = media.build_plan(str(paths[0]), settings)
+            validate_job_sources(job, self.inbox, self.store)
             self.store.transition(job["id"], ["analyzing"], "rendering", "分析完成，开始渲染和成片检查", plan=plan, progress=35)
             output = self.data / "renders" / f"{job['id']}.mp4"
-            report = media.render_plan(plan, str(output), settings)
+            report = (media.render_creation_plan(plan, str(output), settings) if creation is not None
+                      else media.render_plan(plan, str(output), settings))
+            validate_job_sources(job, self.inbox, self.store)
             passed = report.get("qc", {}).get("passed") is True
             if not passed:
                 self.store.transition(job["id"], ["rendering"], "failed", "成片检查未通过，禁止发布", result=report,
@@ -320,7 +403,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         automatic = os.getenv("CUTFLOW_AUTO_PUBLISH") == "1"
         return {"inbox": str(inbox_path), "data_dir": str(data), "delivery": delivery_state(),
                 "review_required": not automatic, "auto_publish": automatic, "supported_extensions": sorted(MEDIA_EXTENSIONS),
-                "preview_supported": True}
+                "preview_supported": True, "creation_supported": True}
 
     @app.get("/api/status", dependencies=[Depends(authorize)])
     def status():
@@ -367,6 +450,61 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     @app.get("/api/jobs", dependencies=[Depends(authorize)])
     def jobs(limit: int = Query(default=100, ge=1, le=500), kind: Literal["production","technical_test"] = "production"):
         return {"jobs": [public_job(job, inbox=inbox_path, store=store) for job in store.list(limit, kind=kind)]}
+
+    @app.post('/api/creations', dependencies=[Depends(authorize)])
+    def new_creation(body: NewCreation):
+        snapshots, seen = [], set()
+        for requested in body.sources:
+            try:
+                path = safe_source(inbox_path, requested)
+                stat = path.stat()
+            except (ValueError, OSError) as exc:
+                raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else '素材暂时无法读取，请等待同步完成') from exc
+            identity = os.path.normcase(str(path))
+            if identity in seen:
+                raise HTTPException(400, '同一素材不能重复选择，请调整素材顺序后提交')
+            if stat.st_size <= 0:
+                raise HTTPException(400, '素材为空或尚未同步完成')
+            seen.add(identity)
+            snapshots.append({'source': path.relative_to(inbox_path).as_posix(), 'size': stat.st_size,
+                              'mtime_ns': stat.st_mtime_ns, 'ctime_ns': stat.st_ctime_ns})
+        if {entry['source'] for entry in snapshots} & store.technical_test_sources():
+            raise DiagnosticSourceConflict('所选素材包含已登记的技术测试，不能用于正式创作')
+        options = body.options.model_dump(exclude_unset=True)
+        try:
+            creative = importlib.import_module('studio.creative')
+        except ImportError as exc:
+            raise HTTPException(503, '创作组件尚未就绪，请稍后重新连接') from exc
+        try:
+            interpretation = creative.interpret_brief(body.brief, options)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if (not isinstance(interpretation, dict) or not isinstance(interpretation.get('resolved'), dict)
+                or not isinstance(interpretation.get('warnings', []), list)
+                or any(not isinstance(warning, str) for warning in interpretation.get('warnings', []))):
+            raise HTTPException(503, '创作组件未返回完整制作方案，已停止提交')
+        settings = {'encoder': 'nvenc' if gpu_status['available'] else 'cpu'}
+        try:
+            configured = json.loads(os.getenv('CUTFLOW_SETTINGS', '{}'))
+            if isinstance(configured, dict):
+                settings.update({key: value for key, value in configured.items()
+                                 if key in {'encoder', 'fps', 'crf', 'normalize_audio'}})
+        except ValueError:
+            raise HTTPException(503, '服务端剪辑参数配置无效，请检查启动配置') from None
+        title = body.title.strip() or body.brief[:30]
+        signature = json.dumps(['creation-v1', snapshots, body.brief, options, title, settings],
+                               sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        settings['creation'] = {'version': 1, 'sources': snapshots, 'brief': body.brief,
+                                'options': options, 'interpretation': interpretation}
+        first = snapshots[0]
+        job, created = store.create(source=first['source'], title=title,
+                                    settings=settings, fingerprint=hashlib.sha256(signature.encode()).hexdigest(),
+                                    source_size=first['size'], source_mtime_ns=first['mtime_ns'],
+                                    idempotency_key=body.idempotency_key)
+        worker.wake_event.set()
+        return JSONResponse(status_code=201 if created else 200,
+                            content={'job': public_job(job, inbox=inbox_path, store=store), 'created': created,
+                                     'owned_by_request': store.owned_by_request(job['id'], body.idempotency_key)})
 
     @app.post("/api/jobs", dependencies=[Depends(authorize)])
     def new_job(body: NewJob, idempotency_key: str | None = Header(default=None)):

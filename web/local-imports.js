@@ -5,7 +5,7 @@ function localImportAvailable(){return localPage&&state.localGateway&&state.base
 function localContext(){return {token:state.token,origin:location.origin};}
 function currentLocalContext(context){return localImportAvailable()&&context.token===state.token&&context.origin===location.origin;}
 function importFeedback(message,error=false){$('#importFeedback').textContent=message;$('#importFeedback').className='media-status'+(error?' error':'');}
-function updateImportModeHelp(){$('#importModeHelp').textContent=$('#importMode').value==='preserve'?'保留所有画面与原有节奏、保持原比例，仍会规范编码并整理音量。适合品牌包装、音乐片和已有成片。':'适合口播、课程、访谈：清理较长停顿，保留原始语速。';}
+function updateImportModeHelp(){$('#importModeHelp').textContent=$('#importMode').value==='library'?'只保存和同步素材。选择素材、填写想法后，点击生成才开始制作。':$('#importMode').value==='preserve'?'保留所有画面与原有节奏、保持原比例，仍会规范编码并整理音量。适合品牌包装、音乐片和已有成片。':'适合口播、课程、访谈：清理较长停顿，保留原始语速。';}
 function updateLocalImportAccess(){
   const available=localImportAvailable();$('#localImportPanel').hidden=!available;
   $('#chooseImportFile').disabled=!available||localImports.busy;$('#importMode').disabled=localImports.busy;$('#startImportButton').disabled=!available||localImports.busy||!localImports.file;$('#openInboxButton').disabled=!available;
@@ -25,7 +25,7 @@ async function localRequest(path,options={}){
 function renderLocalImports(){
   $('#importLimit').textContent='单个视频不超过 '+bytes(localImports.maxBytes);
   $('#localImportsList').innerHTML=localImports.items.length?localImports.items.slice(0,30).map(item=>{
-    const synced=item.status==='synced',mode=item.mode==='preserve'?'完整保留':'口播保守处理',job=item.remote_source&&state.jobs.find(j=>j.source===item.remote_source&&!isTechnicalTest(j));
+    const synced=item.status==='synced',mode=item.mode==='library'?'仅入库':item.mode==='preserve'?'完整保留':'口播保守处理',job=item.mode!=='library'&&item.remote_source&&state.jobs.find(j=>j.source===item.remote_source&&!isTechnicalTest(j));
     const label=job?statusNames[job.status]||'已同步到 GPU':synced?'已同步到 GPU':'已导入本机 · 等待同步';
     return '<article class="local-import-row"><div><strong>'+esc(item.name)+'</strong><p>'+bytes(item.size)+' · '+mode+' · '+esc(date(item.created_at))+'</p></div><span class="status '+(synced?'published':'review')+'">'+esc(label)+'</span>'+(job?'<button class="button subtle" data-import-job="'+esc(job.id)+'" '+(!state.connected?'disabled':'')+'>查看任务</button>':synced&&item.remote_source?'<button class="button subtle" data-import-preview="'+esc(item.remote_source)+'" '+(!state.connected?'disabled':'')+'>预览原片</button>':'<span class="help">'+(state.connected?'等待同步程序处理':'GPU 恢复连接后继续同步')+'</span>')+'</article>';
   }).join(''):'<p class="help">还没有本机导入记录。选择一段视频即可开始。</p>';
@@ -35,7 +35,7 @@ async function refreshLocalLibrary(silent=false){
   const context=localContext();localImports.loading=true;
   try{const data=await localRequest('/local-api/library');if(!currentLocalContext(context))return;
     if(typeof data.inbox!=='string'||!Array.isArray(data.imports))throw new Error('本机素材记录格式不完整。');
-    localImports.inbox=data.inbox;localImports.items=data.imports;localImports.maxBytes=Math.min(2147483648,Number(data.max_bytes)||2147483648);localImports.error='';$('#inboxPath').textContent=data.inbox;renderLocalImports();
+    localImports.inbox=data.inbox;localImports.items=data.imports;localImports.maxBytes=Math.min(2147483648,Number(data.max_bytes)||2147483648);localImports.error='';$('#inboxPath').textContent=data.inbox;renderLocalImports();if(typeof renderCreatorMaterials==='function')renderCreatorMaterials();
   }catch(error){localImports.error=error.message;if(!silent)importFeedback(error.message,true);else if(!localImports.items.length)$('#localImportsList').innerHTML='<p class="media-status error">'+esc(error.message)+'</p>';}
   finally{localImports.loading=false;}
 }
@@ -65,7 +65,7 @@ function uploadLocalFile(file,mode,id,onProgress){
 }
 async function startLocalImport(){
   if(localImports.busy||!localImports.file||!localImportAvailable())return;
-  const file=localImports.file,mode=$('#importMode').value==='preserve'?'preserve':'gentle',id=localImports.requestId;
+  const file=localImports.file,mode=['library','preserve'].includes($('#importMode').value)?$('#importMode').value:'gentle',id=localImports.requestId;
   localImports.busy=true;updateLocalImportAccess();$('#importProgressBox').hidden=false;$('#importProgress').value=0;$('#importProgressText').textContent='准备导入…';importFeedback('正在保存到这台电脑，请保持页面打开。');
   try{const data=await uploadLocalFile(file,mode,id,(done,total)=>{const percent=Math.min(100,Math.round(done/total*100));$('#importProgress').value=percent;$('#importProgressText').textContent=percent===100?'上传完成，正在检查并保存文件…':percent+'% · '+bytes(done)+' / '+bytes(total);});
     const item=data.import;localImports.items=[item,...localImports.items.filter(old=>old.id!==item.id)];renderLocalImports();$('#importProgress').value=100;$('#importProgressText').textContent='已保存到本机';importFeedback(data.duplicate?'这段视频已在本机，无需重复导入。':'导入完成，视频已保存到本机。同步进度可在下方查看。');localImports.file=null;localImports.requestId=null;$('#importFile').value='';$('#importSelectedName').textContent='可以继续选择下一段视频';$('#importSelectedSize').textContent='原文件保持完整';await refreshLocalLibrary(true);

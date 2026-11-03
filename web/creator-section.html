@@ -1,0 +1,34 @@
+<section class="page active" id="page-create">
+  <div class="page-heading creator-heading"><div><div class="eyebrow">CREATE YOUR VIDEO</div><h1>选好素材，说出你的想法<span>。</span></h1><p>选视频、写想法，点击生成。其他设置已经替你准备好。</p></div><span class="tag light">原素材始终保留</span></div>
+  <div class="creator-layout">
+    <section class="panel creator-materials">
+      <div class="section-heading"><div><h2><span class="step-number">1</span> 选择素材</h2><p class="help">已有素材直接勾选；新视频可以一次上传多个。</p></div><span id="creatorSelectedCount" class="tag light">已选 0 段</span></div>
+      <div class="creator-upload" id="creatorDropZone"><div><strong>把视频拖到这里</strong><span>支持多选 · 每段最多 2 GB</span></div><button type="button" id="creatorUploadButton" class="button primary">＋ 上传视频</button><input type="file" id="creatorFileInput" multiple accept=".mp4,.mov,.mkv,.webm,.avi,.m4v,.mts" aria-label="上传制作素材，可多选" hidden></div>
+      <p id="creatorUploadStatus" class="media-status" role="status" aria-live="polite"></p>
+      <div class="creator-library-heading"><strong>我的素材</strong><button type="button" class="text-button" id="creatorRefreshAssets">刷新素材</button></div>
+      <label class="creator-search">查找素材<input id="creatorAssetSearch" type="search" placeholder="按视频名称查找" autocomplete="off"></label>
+      <div id="creatorAssetGrid" class="creator-asset-grid"><p class="help">正在读取你的素材…</p></div>
+      <div class="creator-order-heading"><h3>已选素材 · 按这个顺序制作</h3><button type="button" id="creatorClearSelection" class="text-button">清空选择</button></div>
+      <ol id="creatorSelection" class="creator-selection"></ol>
+      <button type="button" class="button dark creator-next" id="creatorNext">下一步：写下想法 ↓</button>
+    </section>
+    <section class="panel creator-brief-panel">
+      <div class="section-heading"><div><h2><span class="step-number">2</span> 说说你想做什么</h2><p class="help">用途、时长、想突出的内容，都可以写在这里。</p></div></div>
+      <label for="creatorBrief" class="creator-main-label">我对这条视频的想法</label>
+      <textarea id="creatorBrief" maxlength="3000" rows="7" placeholder="例如：做一条30秒竖屏视频，按素材顺序拼接，保留原声，开头标题用“汽车托管，先看这三张清单”。"></textarea>
+      <div class="creator-examples"><span>试试这样写</span><button class="creator-chip" type="button" data-brief-example="做一条30秒竖屏视频，按素材顺序拼接，保留原声。">30 秒竖屏</button><button class="creator-chip" type="button" data-brief-example="保留完整，横屏，加一点轻音乐。">完整横屏＋轻音乐</button><button class="creator-chip" type="button" data-brief-example="把选中的素材按顺序拼接，保留原声，清理长停顿。">自然口播</button></div>
+      <p class="creator-scope">可按想法调整时长、比例、标题、停顿和音乐。当前按所选顺序制作初稿；自动挑选语义亮点、改写内容与新配音尚未接入。</p>
+      <details class="creator-options" id="creatorOptions"><summary>更多设置 <span>可不填，按想法和素材自动安排</span></summary>
+        <label>作品名称（选填）<input id="creatorTitle" maxlength="160" placeholder="留空时根据想法命名"></label>
+        <div class="form-row"><label>成片时长<select id="creatorDuration"><option value="">按想法 / 保留完整</option><option value="15">15 秒</option><option value="30">30 秒</option><option value="60">60 秒</option><option value="90">90 秒</option></select></label><label>画面比例<select id="creatorAspect"><option value="">按想法 / 跟随素材</option><option value="9:16">竖屏 9:16</option><option value="16:9">横屏 16:9</option><option value="1:1">方形 1:1</option><option value="original">跟随首段素材</option></select></label></div>
+        <div class="form-row"><label>剪辑节奏<select id="creatorPace"><option value="">按想法 / 保留完整</option><option value="preserve">保留完整</option><option value="gentle">自然 · 清理长停顿</option><option value="compact">紧凑 · 清理较短停顿</option></select></label><label>原声<select id="creatorOriginalAudio"><option value="">按想法 / 保留原声</option><option value="true">保留素材原声</option><option value="false">关闭素材原声</option></select></label></div>
+        <label>背景音乐<select id="creatorMusic"><option value="">按想法 / 不额外添加</option><option value="true">添加原创轻音乐</option><option value="false">不额外添加音乐</option></select></label>
+        <label>开头标题（选填）<input id="creatorOpeningTitle" maxlength="100" placeholder="也可以直接在想法里写“开头标题用……”"></label>
+        <p class="help">这里的选择优先于文字想法；不额外添加音乐不会移除原视频自带的音乐。</p>
+      </details>
+      <div class="creator-submit"><button type="button" class="button primary" id="creatorGenerate">生成视频 →</button><p id="creatorReadiness" class="help">先选素材，再写下你的想法。</p></div>
+      <div id="creatorFeedback" class="media-status" role="status" aria-live="polite"></div>
+      <div id="creatorResult" class="creator-result" hidden></div>
+    </section>
+  </div>
+</section>

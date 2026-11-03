@@ -78,6 +78,20 @@ class LocalImportTests(unittest.TestCase):
         self.assertEqual(len(self.client.get('/local-api/library', headers=self.headers).json()['imports']), 1)
         self.assertFalse(list(self.inbox.rglob('*.part')))
 
+    def test_library_import_keeps_receipt_and_retry_without_creating_jobs(self):
+        identifier = str(uuid.uuid4())
+        first = self.upload(identifier, mode='library')
+        self.assertEqual(first.status_code, 200, first.text)
+        receipt = first.json()['import']
+        self.assertEqual(receipt['mode'], 'library')
+        self.assertEqual(receipt['source'], f'工作台导入/library/{identifier}/公司视频.mp4')
+        self.assertEqual(receipt['status'], 'waiting_sync')
+        self.assertIsNone(receipt['remote_source'])
+        self.assertTrue(self.upload(identifier, mode='library').json()['duplicate'])
+        self.assertEqual(self.upload(identifier, mode='gentle').status_code, 409)
+        self.assertEqual(self.client.get('/local-api/library', headers=self.headers).json()['imports'], [receipt])
+        self.assertEqual(self.calls, [])
+
     def test_invalid_video_and_incomplete_stream_never_enter_media_queue(self):
         self.probe.side_effect = ImportProblem('视频检查未通过')
         self.assertEqual(self.upload().status_code, 400)
