@@ -56,7 +56,7 @@ async function prepareWorkVariant(id,kind){
 }
 function variantDraftContext(){return JSON.stringify({context:productionContext(),fields:productionFields.map(id=>productionChecks.has(id)?$('#'+id).checked:$('#'+id).value),portrait:production.portraitId,kind:production.kind});}
 async function applyWorkDraft(data,kind){
-  if(creatorInputLocked())throw new Error('请先核对当前制作任务');const d=data.draft,options=d.options||{};
+  if(creatorInputLocked())throw new Error('请先核对当前制作任务');if(typeof stashBeforeWorkVariant==='function')stashBeforeWorkVariant();const d=data.draft,options=d.options||{};
   production.mode=d.mode||'edit';production.parentId=data.parent_job_id;production.parentTitle=data.title;production.revisionKind=kind;production.referenceIds=[];production.scriptId=null;production.scriptJob=null;production.scriptBody=null;production.scriptContext=null;production.uncertain=false;clearTimeout(production.pollTimer);production.pollTimer=null;$('#productionScriptPreview').hidden=true;scriptMessage('');
   creator.selected=(data.sources||[]).map(s=>'s:'+s);creator.resultId=null;$('#creatorBrief').value=d.brief||'';$('#productionScript').value=d.spoken_script||'';$('#productionSubtype').value=d.subtype||'salon_promo';
   for(const [key,id] of Object.entries({name:'productionBrand',cta:'productionCTA',event_date:'productionDate',event_place:'productionPlace'}))$('#'+id).value=d.brand?.[key]||'';
