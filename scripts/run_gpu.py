@@ -28,6 +28,11 @@ def main():
     preset['encoder'] = 'nvenc'
     env['CUTFLOW_SETTINGS'] = json.dumps(preset)
     env.setdefault('CUTFLOW_AUTO_PUBLISH','0')
+    idea_python = base/'idea-runtime/bin/python'
+    idea_model = base/'models/Qwen3-4B-Instruct-2507'
+    if idea_python.is_file() and idea_model.is_dir():
+        env.setdefault('CUTFLOW_IDEA_PYTHON', str(idea_python))
+        env.setdefault('CUTFLOW_IDEA_MODEL_DIR', str(idea_model))
     commands = {
         'server':[sys.executable,'-m','uvicorn','studio.server:app','--host','127.0.0.1','--port','8765','--no-access-log'],
         'watcher':[sys.executable,'-m','studio.watch'],

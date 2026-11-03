@@ -79,6 +79,18 @@ def interpret_brief(brief: str, options: dict | None = None) -> dict:
     """Compile supported explicit requests. Options override every inferred value."""
     if not isinstance(brief, str) or len(brief) > 4000 or "\x00" in brief:
         raise CreativeError("创作想法须为不超过 4000 字的文字。")
+    marker = "【剪辑执行要求】"
+    count = brief.count(marker)
+    if count > 1:
+        raise CreativeError("剪辑执行要求标记只能出现一次，请保留一个明确的执行区块。")
+    execution_only = count == 1
+    if execution_only:
+        execution = brief.split(marker, 1)[1].strip()
+        if not execution or len(execution) > 1000:
+            raise CreativeError("剪辑执行要求区块须包含 1–1000 字的明确要求。")
+        # The caller retains the full original brief. Only this explicitly
+        # adopted execution block may control deterministic editing options.
+        brief = execution
     if options is not None and not isinstance(options, dict):
         raise CreativeError("创作选项必须为对象。")
     options = options or {}
@@ -86,7 +98,8 @@ def interpret_brief(brief: str, options: dict | None = None) -> dict:
     if unknown:
         raise CreativeError("存在不支持的创作选项。")
     choices = dict(DEFAULT_CHOICES)
-    parse_warnings = []
+    parse_warnings = (["完整创意、分镜和新旁白作为策划保存；本次仅执行末尾【剪辑执行要求】中的可支持项目。"]
+                      if execution_only else [])
     title = re.search(r"(?:开头标题|片头标题|标题)(?:\s*(?:用|为|是|写|写成|设为|[:：]))?\s*[“\"「『](.*?)[”\"」』]", brief)
     # Text inside the explicitly requested title is content, not instructions.
     parsed = brief[:title.start()] + brief[title.end():] if title else brief

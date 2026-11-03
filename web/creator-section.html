@@ -14,8 +14,9 @@
     </section>
     <section class="panel creator-brief-panel">
       <div class="section-heading"><div><h2><span class="step-number">2</span> 说说你想做什么</h2><p class="help">用途、时长、想突出的内容，都可以写在这里。</p></div></div>
-      <label for="creatorBrief" class="creator-main-label">我对这条视频的想法</label>
+      <div class="creator-idea-label"><label for="creatorBrief" class="creator-main-label">我对这条视频的想法</label><button type="button" class="idea-refine" id="ideaRefineButton">✦ 帮我完善想法</button></div>
       <textarea id="creatorBrief" maxlength="3000" rows="7" placeholder="例如：做一条30秒竖屏视频，按素材顺序拼接，保留原声，开头标题用“汽车托管，先看这三张清单”。"></textarea>
+      <div class="idea-tools"><p id="ideaStatus" class="idea-status" role="status" aria-live="polite">一句简单想法也可以。先出完整方案，采用后才会替换原文。</p><button type="button" class="text-button idea-undo" id="ideaUndoButton" hidden>撤销采用</button></div>
       <div class="creator-examples"><span>试试这样写</span><button class="creator-chip" type="button" data-brief-example="做一条30秒竖屏视频，按素材顺序拼接，保留原声。">30 秒竖屏</button><button class="creator-chip" type="button" data-brief-example="保留完整，横屏，加一点轻音乐。">完整横屏＋轻音乐</button><button class="creator-chip" type="button" data-brief-example="把选中的素材按顺序拼接，保留原声，清理长停顿。">自然口播</button></div>
       <p class="creator-scope">可按想法调整时长、比例、标题、停顿和音乐。当前按所选顺序制作初稿；自动挑选语义亮点、改写内容与新配音尚未接入。</p>
       <details class="creator-options" id="creatorOptions"><summary>更多设置 <span>可不填，按想法和素材自动安排</span></summary>

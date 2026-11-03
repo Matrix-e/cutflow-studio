@@ -71,6 +71,23 @@ class BriefTests(unittest.TestCase):
             self.assertTrue(result["keep_original_audio"])
             self.assertEqual(result["pace"], "gentle")
 
+    def test_adopted_idea_only_compiles_explicit_execution_block(self):
+        brief = ('创意正文：开头3秒提出问题，计划60秒横屏，建议音乐和新旁白。'
+                 '\n\n【剪辑执行要求】\n整片30秒，9:16，保留原声，不要音乐')
+        result = interpret_brief(brief)
+        self.assertEqual(result["resolved"]["target_duration"], 30)
+        self.assertEqual(result["resolved"]["aspect"], "9:16")
+        self.assertTrue(result["resolved"]["keep_original_audio"])
+        self.assertFalse(result["resolved"]["music"])
+        self.assertTrue(any("作为策划保存" in w for w in result["warnings"]))
+        self.assertFalse(any("多个整体时长" in w or "多个画幅" in w for w in result["warnings"]))
+
+    def test_execution_block_empty_duplicate_or_oversized_rejected(self):
+        for brief in ('创意【剪辑执行要求】', '【剪辑执行要求】30秒【剪辑执行要求】40秒',
+                      '【剪辑执行要求】' + 'a' * 1001):
+            with self.subTest(brief=brief[:30]), self.assertRaises(CreativeError):
+                interpret_brief(brief)
+
     def test_unimplemented_requests_are_visible(self):
         result = interpret_brief("提取精彩片段，改写旁白，加字幕，卡点转场")
         joined = " ".join(result["warnings"])
@@ -151,6 +168,13 @@ class CreativeIntegrationTests(unittest.TestCase):
         larger = build_creation_plan([str(self.red)], "10秒", settings=self.settings)
         self.assertAlmostEqual(larger["duration"], 2, delta=0.04)
         self.assertTrue(any("未循环" in w for w in larger["warnings"]))
+
+    def test_plan_retains_full_adopted_idea_while_using_execution_settings(self):
+        brief = '完整策划：建议60秒横屏音乐旁白。\n【剪辑执行要求】\n1秒，保留原比例，不要音乐'
+        plan = build_creation_plan([str(self.red)], brief, settings=self.settings)
+        self.assertEqual(plan["brief"], brief)
+        self.assertEqual(plan["resolved"]["target_duration"], 1)
+        self.assertFalse(plan["resolved"]["music"])
 
     def test_twelve_short_sources_join_without_duration_drift(self):
         plan = build_creation_plan([str(p) for p in [self.red, self.blue] * 6], "1.5秒", settings=self.settings)

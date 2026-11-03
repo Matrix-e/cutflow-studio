@@ -46,6 +46,7 @@ function updateCreatorAccess(){
   $('#creatorGenerate').disabled=creator.busy||!state.connected||!supported||(!creator.uncertain&&(!brief||!selected.length||waiting>0||creator.uploading));
   $('#creatorGenerate').textContent=creator.busy?'正在提交制作任务…':creator.uncertain?'核对并继续提交':creator.resultId?'按当前想法再做一版 →':'生成视频 →';
   $('#creatorReadiness').textContent=creator.busy?'任务只提交一次，请稍候。':!supported?'制作服务正在连接或升级，你可以先写下想法。':!state.connected?'等待制作服务连接恢复。':creator.uncertain?'上次提交结果待确认；再次点击会使用相同编号核对，不会重复创建。':!selected.length?'先选素材，再写下你的想法。':waiting?waiting+' 段素材正在等待同步，完成后即可生成。':!brief?'素材已就绪，写下你的想法就可以生成。':selected.length+' 段素材已就绪 · 生成后进入成片审核';
+  if(typeof updateIdeaAccess==='function')updateIdeaAccess();
 }
 function toggleCreatorMaterial(key,on){
   if(creatorInputLocked())return;

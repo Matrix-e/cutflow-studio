@@ -30,6 +30,7 @@ from .store import DiagnosticSourceConflict, StateConflict, Store
 from .collection_service import register_collection_routes
 from .profiles import display_name, import_mode
 from .preview import PreviewManager, PreviewError
+from .ideas_service import register_ideas_routes
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts"}
@@ -317,7 +318,7 @@ def safe_subtitle(inbox: Path, relative: str) -> Path:
 
 
 def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None = None,
-               token: str | None = None, start_worker: bool = True) -> FastAPI:
+               token: str | None = None, start_worker: bool = True, idea_provider=None) -> FastAPI:
     data = Path(data_dir or os.getenv("CUTFLOW_DATA", PROJECT_ROOT / "data")).resolve()
     inbox_path = Path(inbox or os.getenv("CUTFLOW_INBOX", PROJECT_ROOT / "素材投递箱")).resolve()
     token_value = os.getenv("CUTFLOW_TOKEN", "") if token is None else token
@@ -334,9 +335,11 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         if start_worker:
             worker.start()
             collection_worker.start()
+            ideas_worker.start()
         try:
             yield
         finally:
+            ideas_worker.stop()
             previews.stop()
             if start_worker:
                 collection_worker.stop()
@@ -374,6 +377,9 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
             raise HTTPException(401, "需要有效的本机访问口令", headers={"WWW-Authenticate": "Bearer"})
 
     collection_worker = register_collection_routes(app, authorize, inbox_path, data)
+    ideas_worker = register_ideas_routes(app, authorize, inbox_path, data, source_validator=safe_source,
+                                        name_formatter=display_name, provider=idea_provider)
+    app.state.ideas = ideas_worker
 
     def get_job(job_id: str):
         job = store.get(job_id)
@@ -403,7 +409,8 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         automatic = os.getenv("CUTFLOW_AUTO_PUBLISH") == "1"
         return {"inbox": str(inbox_path), "data_dir": str(data), "delivery": delivery_state(),
                 "review_required": not automatic, "auto_publish": automatic, "supported_extensions": sorted(MEDIA_EXTENSIONS),
-                "preview_supported": True, "creation_supported": True}
+                "preview_supported": True, "creation_supported": True,
+                "idea_refinement_supported": ideas_worker.supported()}
 
     @app.get("/api/status", dependencies=[Depends(authorize)])
     def status():
