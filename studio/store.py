@@ -18,6 +18,10 @@ class StateConflict(ValueError):
     pass
 
 
+class DiagnosticSourceConflict(StateConflict):
+    code = "technical_test_source"
+
+
 class Store:
     JSON_FIELDS = {"settings", "plan", "result", "publication"}
 
@@ -34,7 +38,8 @@ class Store:
                     settings TEXT NOT NULL, status TEXT NOT NULL,
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     plan TEXT, result TEXT, output_path TEXT, error TEXT,
-                    publication TEXT, progress INTEGER NOT NULL DEFAULT 0
+                    publication TEXT, progress INTEGER NOT NULL DEFAULT 0,
+                    job_kind TEXT NOT NULL DEFAULT 'production', diagnostic_reason TEXT
                 );
                 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status,created_at);
                 CREATE TABLE IF NOT EXISTS events (
@@ -42,6 +47,12 @@ class Store:
                     created_at TEXT NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL
                 );
             """)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+            if "job_kind" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN job_kind TEXT NOT NULL DEFAULT 'production'")
+            if "diagnostic_reason" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN diagnostic_reason TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS jobs_kind_status ON jobs(job_kind,status,created_at)")
 
     @contextmanager
     def connection(self):
@@ -79,25 +90,67 @@ class Store:
             return conn.execute("SELECT 1 FROM jobs WHERE id=? AND idempotency_key=?",
                                 (job_id,request_key)).fetchone() is not None
 
-    def list(self, limit: int = 100):
+    def list(self, limit: int = 100, kind: str = "production"):
+        if kind not in {"production", "technical_test", "all"}:
+            raise ValueError("Invalid job kind")
         with self.connection() as conn:
+            if kind == "all":
+                return [self.decode(row) for row in conn.execute(
+                    "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,))]
             return [self.decode(row) for row in conn.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,))]
+                "SELECT * FROM jobs WHERE job_kind=? ORDER BY created_at DESC LIMIT ?", (kind,limit))]
 
     def events(self, job_id: str):
         with self.connection() as conn:
             return [dict(row) for row in conn.execute(
                 "SELECT created_at,status,message FROM events WHERE job_id=? ORDER BY id", (job_id,))]
 
-    def counts(self):
+    def counts(self, kind: str = "production"):
+        if kind not in {"production", "technical_test", "all"}:
+            raise ValueError("Invalid job kind")
         with self.connection() as conn:
+            if kind == "all":
+                return {row["status"]: row["count"] for row in conn.execute(
+                    "SELECT status,COUNT(*) AS count FROM jobs GROUP BY status")}
             return {row["status"]: row["count"] for row in conn.execute(
-                "SELECT status,COUNT(*) AS count FROM jobs GROUP BY status")}
+                "SELECT status,COUNT(*) AS count FROM jobs WHERE job_kind=? GROUP BY status", (kind,))}
+
+    def technical_test_sources(self) -> set[str]:
+        """Only explicitly registered diagnostics; never infer from filenames."""
+        with self.connection() as conn:
+            return {row["source"] for row in conn.execute("SELECT DISTINCT source FROM jobs WHERE job_kind='technical_test'")}
+
+    def mark_technical_test(self, job_id: str, reason: str):
+        """Internal administrative classification; retains media and audit evidence.
+
+        Callers must establish the asset's provenance before invoking this method.
+        There is deliberately no public API route that performs classification.
+        """
+        if not isinstance(reason,str) or not reason.strip() or len(reason)>2000:
+            raise ValueError("技术测试分类必须记录 1–2000 字符的具体原因")
+        reason = reason.strip()
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM jobs WHERE id=?",(job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["status"] not in {"review","approved","failed"}:
+                raise StateConflict("任务正在执行或已发布，不能在此状态重新分类为技术测试")
+            if row["job_kind"] == "technical_test" and row["diagnostic_reason"] == reason:
+                return self.decode(row)
+            timestamp = now()
+            conn.execute("UPDATE jobs SET job_kind='technical_test',diagnostic_reason=?,updated_at=? WHERE id=?",
+                         (reason,timestamp,job_id))
+            conn.execute("INSERT INTO events(job_id,created_at,status,message) VALUES(?,?,?,?)",
+                         (job_id,timestamp,row["status"],"已明确归档为技术测试，保留验证资料，不用于正式发布："+reason))
+            return self.decode(conn.execute("SELECT * FROM jobs WHERE id=?",(job_id,)).fetchone())
 
     def create(self, *, source: str, title: str, settings: dict, fingerprint: str,
                source_size: int, source_mtime_ns: int, idempotency_key: str | None = None):
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM jobs WHERE source=? AND job_kind='technical_test' LIMIT 1",(source,)).fetchone():
+                raise DiagnosticSourceConflict("该素材已登记为技术测试，不能进入正式剪辑队列")
             if idempotency_key:
                 previous = conn.execute("SELECT * FROM jobs WHERE idempotency_key=?", (idempotency_key,)).fetchone()
                 if previous:
@@ -131,6 +184,8 @@ class Store:
                 raise KeyError(job_id)
             if row["status"] not in expected:
                 raise StateConflict(f"当前状态 {row['status']} 不允许此操作")
+            if row["job_kind"] == "technical_test" and status in {"queued","analyzing","rendering","approved","publishing","published"}:
+                raise StateConflict("技术测试记录仅供排查，不能审批、重新剪辑或发布为正式视频")
             timestamp = now()
             changes = {"status": status, "updated_at": timestamp, **fields}
             values = [json.dumps(v, ensure_ascii=False) if k in self.JSON_FIELDS and v is not None else v
@@ -143,7 +198,7 @@ class Store:
     def claim(self):
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
+            row = conn.execute("SELECT * FROM jobs WHERE status='queued' AND job_kind='production' ORDER BY created_at LIMIT 1").fetchone()
             if not row:
                 return None
             timestamp = now()

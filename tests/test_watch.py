@@ -19,6 +19,7 @@ class WatchTests(unittest.TestCase):
         self.source.write_bytes(b"video")
         self.calls = []
         self.job_status = "review"
+        self.job_kind = "production"
         self.send_timeout = False
         self.submit_timeout = False
 
@@ -37,7 +38,7 @@ class WatchTests(unittest.TestCase):
             if self.send_timeout:
                 raise httpx.ReadTimeout("secret should not be logged")
             self.job_status = "published"
-        return httpx.Response(200,json={"job":{"id":"job1","status":self.job_status,"result":{"qc":{"passed":True}}}})
+        return httpx.Response(200,json={"job":{"id":"job1","status":self.job_status,"job_kind":self.job_kind,"result":{"qc":{"passed":True}}}})
 
     def watcher(self, automatic=False):
         client = httpx.Client(transport=httpx.MockTransport(self.handler))
@@ -134,6 +135,53 @@ class WatchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validated_url(url)
         self.assertEqual(validated_url("https://gpu.example.com/"),"https://gpu.example.com")
+
+    def test_registered_test_source_is_not_retried_after_restart_or_settings_change(self):
+        calls=[]
+        def reject_diagnostic(request):
+            calls.append((request.method,request.url.path))
+            return httpx.Response(409,json={"detail":"technical evidence","code":"technical_test_source"})
+        with httpx.Client(transport=httpx.MockTransport(reject_diagnostic)) as client:
+            watch=Watcher(self.inbox,self.root/'diagnostic-data','http://127.0.0.1:8765','test',auto_publish=True,client=client)
+            watch.tick(now=0)
+            result=watch.tick(now=15)
+            self.assertEqual(result[0]['status'],'technical_test')
+            watch.tick(now=30)
+            restarted=Watcher(self.inbox,self.root/'diagnostic-data','http://127.0.0.1:8765','test',
+                              settings={'remove_silence':False},auto_publish=True,client=client)
+            restarted.tick(now=45)
+            restarted.tick(now=60)
+        self.assertEqual(calls,[('POST','/api/jobs')])
+        self.assertTrue(self.source.is_file())
+
+    def test_owned_job_later_classified_as_test_stops_automatic_progress(self):
+        self.job_status='queued'
+        watch=self.watcher(automatic=True)
+        watch.tick(now=0)
+        watch.tick(now=15)
+        self.job_status='review'
+        self.job_kind='technical_test'
+        result=watch.tick(now=30)
+        self.assertTrue(any(row['status']=='technical_test' for row in result))
+        calls_after_classification=list(self.calls)
+        watch.tick(now=45)
+        restarted=self.watcher(automatic=True)
+        restarted.tick(now=60)
+        restarted.tick(now=75)
+        self.assertEqual(self.calls,calls_after_classification)
+        self.assertFalse(any(path.endswith(('/approve','/publish')) for _,path in self.calls))
+
+    def test_other_conflicts_do_not_falsely_classify_material_as_test(self):
+        calls=[]
+        def other_conflict(request):
+            calls.append(request.url.path)
+            return httpx.Response(409,json={'detail':'different conflict'})
+        with httpx.Client(transport=httpx.MockTransport(other_conflict)) as client:
+            watch=Watcher(self.inbox,self.root/'other-data','http://127.0.0.1:8765','test',client=client)
+            watch.tick(now=0)
+            self.assertEqual(watch.tick(now=15)[0]['status'],'waiting')
+            watch.tick(now=30)
+        self.assertEqual(calls,['/api/jobs','/api/jobs'])
 
 
 if __name__ == "__main__":

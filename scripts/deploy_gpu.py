@@ -19,7 +19,7 @@ from studio.sync import SFTPTransport, stable_hash
 
 ROOT_FILES = {"README.md", "requirements.txt", "requirements-browser.txt", "pyproject.toml", ".env.example", "config/preset.json"}
 SOURCE_RULES = {
-    "studio": {".py"}, "tests": {".py"}, "scripts": {".py", ".sh", ".ps1", ".cmd"},
+    "studio": {".py"}, "tests": {".py", ".js"}, "scripts": {".py", ".sh", ".ps1", ".cmd"},
     "web": {".html", ".css", ".js", ".svg", ".png", ".jpg", ".webp", ".woff2"},
     "docs": {".md"},
 }

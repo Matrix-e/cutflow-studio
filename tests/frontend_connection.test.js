@@ -14,7 +14,7 @@ const tick=async()=>{for(let i=0;i<15;i++)await Promise.resolve();};
 async function setup(){
   const elements=new Map(),listeners=new Map(),intervals=[],calls=[];let timer=0;
   class Element{
-    constructor(id=''){this.id=id;this.className='';this.textContent='';this.innerHTML='';this.hidden=false;this.disabled=false;this.open=false;this.value='';this.dataset={};this.listeners={};this.classList={contains:name=>this.className.split(' ').includes(name),toggle:(name,on)=>{const values=new Set(this.className.split(' ').filter(Boolean));on?values.add(name):values.delete(name);this.className=[...values].join(' ');}};}
+    constructor(id=''){this.id=id;this.className='';this.textContent='';this.innerHTML='';this.hidden=false;this.disabled=false;this.open=false;this.value='';this.dataset={};this.style={};this.listeners={};this.classList={contains:name=>this.className.split(' ').includes(name),toggle:(name,on)=>{const values=new Set(this.className.split(' ').filter(Boolean));on?values.add(name):values.delete(name);this.className=[...values].join(' ');}};}
     addEventListener(name,fn){this.listeners[name]=fn;}
     before(el){if(el.id)elements.set(el.id,el);}
     after(el){if(el.id)elements.set(el.id,el);}
@@ -29,7 +29,7 @@ async function setup(){
   const document={hidden:false,title:'',querySelector:selector=>selector==='.local-access'?access:selector.startsWith('#')?elements.get(selector.slice(1))||null:null,querySelectorAll:()=>[],createElement:()=>new Element(),addEventListener:(name,fn)=>listeners.set(name,fn)};
   const harness={elements,document,listeners,intervals,calls,fetchImpl:async()=>result({},404)};
   const context=vm.createContext({document,location:{hostname:'127.0.0.1',origin:'http://127.0.0.1:8767',hash:'',pathname:'/'},history:{replaceState(){}},URL,URLSearchParams,AbortController,AbortSignal,Blob,Date,console,crypto:{randomUUID:()=> 'request-id'},setTimeout:()=>++timer,clearTimeout(){},setInterval:(fn,ms)=>{intervals.push({fn,ms});return ++timer;},fetch:(url,options={})=>{calls.push({url,options});return harness.fetchImpl(url,options);}});
-  vm.runInContext(source+'\nglobalThis.app={state,api,refresh,review,reportError,setConnection,nextEpoch,connectionContext,probeIfVisible,toast,updateReviewActions};',context);
+  vm.runInContext(source+'\nglobalThis.app={state,api,refresh,review,reportError,setConnection,nextEpoch,connectionContext,probeIfVisible,toast,updateReviewActions,renderJobs,refreshTechnicalTests,selectJobFilter};',context);
   await tick();
   harness.app=context.app;calls.length=0;
   harness.configure=(connected=true)=>{Object.assign(harness.app.state,{base:'http://127.0.0.1:8767',token:'a'.repeat(32),localGateway:true,jobs:[{id:'j1',title:'Existing',status:'review',source:'source.mp4'}],assets:[{source:'source.mp4',name:'source.mp4',size:10,extension:'.mp4'}],config:{delivery:{enabled:true,configured:true}},selected:{id:'j1',status:'review'},lastSuccessAt:Date.now()});harness.app.setConnection(connected,undefined,connected?'connected':'error');};
@@ -154,4 +154,95 @@ test('incomplete 200 status cannot show green or replace cached jobs',async()=>{
   await h.app.refresh(true);
   assert.equal(h.app.state.connected,false);
   assert.equal(h.app.state.jobs[0].title,'Existing');
+});
+
+const diagnosticJob=()=>({id:'qa1',title:'old-colorbar-render-name',source:'synthetic-qa.mp4',job_kind:'technical_test',diagnostic_reason:'合成彩条与测试音，仅验证链路。',status:'review',has_video:false,plan:{duration:3,clips:[]},result:{qc:{passed:true}}});
+
+test('technical tests are excluded from production overview and counts',async()=>{
+  const h=await setup();h.configure();
+  h.fetchImpl=async url=>url.endsWith('/api/status')?result({worker_running:true,execution_target:'remote_gpu',counts:{},technical_test_count:2}):url.endsWith('/api/jobs')?result({jobs:[diagnosticJob()]}):h.good(url);
+  await h.app.refresh(true);
+  assert.equal(h.app.state.jobs.length,0);
+  assert.equal(h.elements.get('statReview').textContent,0);
+  assert.equal(h.elements.get('jobBadge').textContent,0);
+  assert.equal(h.elements.get('technicalTestCount').textContent,2);
+  assert.match(h.elements.get('recentJobs').innerHTML,/还没有正式成片。/);
+  assert.doesNotMatch(h.elements.get('recentJobs').innerHTML,/old-colorbar-render-name/);
+  assert.equal(h.calls.filter(call=>call.url.includes('kind=technical_test')).length,0);
+});
+
+test('technical filter loads a separate read-only list and never labels tests as waiting editorial review',async()=>{
+  const h=await setup();h.configure();h.app.state.jobs=[];h.app.state.technicalTestCount=2;h.app.renderJobs();
+  h.elements.get('statReview').textContent=0;
+  h.fetchImpl=async url=>{assert.ok(url.endsWith('/api/jobs?kind=technical_test'));return result({jobs:[diagnosticJob()]});};
+  await h.app.selectJobFilter('technical_test');
+  assert.equal(h.app.state.jobs.length,0);assert.equal(h.app.state.technicalTests.length,1);
+  assert.match(h.elements.get('jobsList').innerHTML,/技术自测（非成片）/);
+  assert.match(h.elements.get('jobsList').innerHTML,/自测通过/);
+  assert.doesNotMatch(h.elements.get('jobsList').innerHTML,/等待审核/);
+  assert.doesNotMatch(h.elements.get('recentJobs').innerHTML,/彩条/);
+  assert.equal(h.elements.get('statReview').textContent,0);
+  await h.app.selectJobFilter('all');
+  assert.match(h.elements.get('jobsList').innerHTML,/还没有正式成片。/);
+});
+
+test('diagnostic detail prominently identifies a test and blocks approve and publish even when invoked directly',async()=>{
+  const h=await setup();h.configure();h.fetchImpl=async()=>result({job:diagnosticJob()});
+  await h.app.review('qa1');
+  assert.equal(h.elements.get('technicalTestNotice').hidden,false);
+  assert.match(html,/测试图案，仅用于链路检查，不是商业视频/);
+  assert.equal(h.elements.get('reviewTitle').textContent,'GPU 链路自测（彩条测试片）');
+  assert.equal(h.elements.get('reviewActions').hidden,true);
+  assert.equal(h.elements.get('reviewActions').style.display,'none');
+  assert.equal(h.elements.get('approveButton').disabled,true);assert.equal(h.elements.get('publishButton').disabled,true);
+  assert.doesNotMatch(h.elements.get('reviewDetails').innerHTML,/等待审核|预期成片/);
+  assert.match(h.elements.get('reviewDetails').innerHTML,/synthetic-qa.mp4/);
+  h.calls.length=0;await h.elements.get('approveButton').onclick();
+  h.app.state.selected.status='approved';await h.elements.get('publishButton').onclick();assert.equal(h.calls.length,0);
+});
+
+test('production detail restores ordinary review controls after a technical test',async()=>{
+  const h=await setup();h.configure();h.fetchImpl=async()=>result({job:diagnosticJob()});await h.app.review('qa1');
+  h.fetchImpl=async()=>result({job:{id:'real1',title:'真实访谈',source:'interview.mp4',job_kind:'production',status:'review',has_video:false}});
+  await h.app.review('real1');
+  assert.equal(h.elements.get('technicalTestNotice').hidden,true);
+  assert.equal(h.elements.get('reviewActions').hidden,false);assert.equal(h.elements.get('approveButton').disabled,false);
+  assert.equal(h.elements.get('reviewTitle').textContent,'真实访谈');
+});
+
+test('late technical query cannot repopulate records after disconnect',async()=>{
+  const h=await setup();h.configure();const hold=pending();h.fetchImpl=()=>hold.promise;
+  const load=h.app.selectJobFilter('technical_test');h.elements.get('disconnectButton').onclick();
+  hold.resolve(result({jobs:[diagnosticJob()]}));await load;
+  assert.equal(h.app.state.technicalTests.length,0);assert.equal(h.app.state.technicalTestCount,0);
+});
+
+test('refresh closes an open production review when it is reclassified and never reloads its video',async()=>{
+  const h=await setup();h.configure();
+  const original={id:'qa1',title:'Old production label',source:'source.mp4',job_kind:'production',status:'review',has_video:true,video_url:'/api/jobs/qa1/video'};
+  h.fetchImpl=async url=>url.endsWith('/video')?result({}):result({job:original});
+  await h.app.review('qa1');
+  assert.equal(h.elements.get('reviewDialog').open,true);
+  const blob=h.app.state.videoBlob;
+  assert.ok(blob);
+  h.calls.length=0;
+  h.fetchImpl=async url=>url.endsWith('/api/jobs')?result({jobs:[{...original,title:'Latest production fields',diagnostic_reason:null}]}):h.good(url);
+  await h.app.refresh(true);
+  assert.equal(h.app.state.selected.title,'Latest production fields');
+  assert.equal(h.app.state.selected.job_kind,'production');
+  assert.equal(h.app.state.videoBlob,blob);
+  assert.equal(h.calls.length,4);
+  h.calls.length=0;
+  h.fetchImpl=async url=>url.endsWith('/api/jobs')?result({jobs:[]}):url.endsWith('/api/status')?result({worker_running:true,execution_target:'remote_gpu',counts:{},technical_test_count:1}):h.good(url);
+  await h.app.refresh(true);
+  assert.equal(h.elements.get('reviewDialog').open,false);
+  assert.equal(h.app.state.selected,null);
+  assert.equal(h.app.state.videoBlob,null);
+  assert.equal(h.elements.get('reviewVideo').src,undefined);
+  assert.equal(h.elements.get('approveButton').disabled,true);
+  assert.equal(h.elements.get('publishButton').disabled,true);
+  assert.match(h.elements.get('toast').textContent,/任务列表已更新，请重新打开记录查看/);
+  assert.equal(h.app.state.connected,true);
+  assert.equal(h.calls.length,4);
+  assert.ok(h.calls.every(call=>!call.url.endsWith('/video')&&!call.url.endsWith('/api/jobs/qa1')));
 });

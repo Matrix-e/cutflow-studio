@@ -2,7 +2,7 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const localPage = ['127.0.0.1','localhost','[::1]'].includes(location.hostname);
-const state = {base:localPage ? location.origin : '', token:'', connected:false, jobs:[], assets:[], config:{}, filter:'all', selected:null, videoBlob:null,epoch:0,phase:'idle',lastCheckAt:null,lastSuccessAt:null,lastConnectionError:'',refreshing:null,requests:new Set(),localGateway:false,reauthNeeded:false,reauthAttempted:false,reviewRequest:0,actionBusy:false,toastKind:null};
+const state = {base:localPage ? location.origin : '', token:'', connected:false, jobs:[], technicalTests:[],technicalTestCount:0,technicalLoading:null,technicalLoaded:false,assets:[], config:{}, filter:'all', selected:null, videoBlob:null,epoch:0,phase:'idle',lastCheckAt:null,lastSuccessAt:null,lastConnectionError:'',refreshing:null,requests:new Set(),localGateway:false,reauthNeeded:false,reauthAttempted:false,reviewRequest:0,actionBusy:false,toastKind:null};
 const statusNames = {queued:'排队中',analyzing:'分析素材',rendering:'渲染检查',review:'等待审核',approved:'已审核',publishing:'正在推送',published:'已推送',failed:'需要处理'};
 const presets = {gentle:{silence_min:0.9,padding:0.25,min_clip:0.5},course:{silence_min:1.5,padding:0.4,min_clip:0.8},compact:{silence_min:0.7,padding:0.2,min_clip:0.5}};
 let toastTimer;
@@ -17,10 +17,11 @@ function currentContext(context){return context.epoch===state.epoch&&context.bas
 function staleRequest(){return Object.assign(new Error('连接状态已变化，请以最新检查结果为准。'),{stale:true});}
 function uncertainRequest(){return Object.assign(new Error('操作结果需核实，请查看任务记录；不会自动重复提交。'),{uncertain:true});}
 function nextEpoch(){state.epoch++;for(const request of state.requests)if(request.readOnly)request.controller.abort();}
-function updateReviewActions(){const j=state.selected;$('#approveButton').disabled=!state.connected||state.actionBusy||j?.status!=='review';$('#publishButton').disabled=!state.connected||state.actionBusy||j?.status!=='approved'||!state.config.delivery?.enabled||!state.config.delivery?.configured;}
+function isTechnicalTest(job){return job?.job_kind==='technical_test';}
+function updateReviewActions(){const j=state.selected,technical=isTechnicalTest(j);$('#approveButton').disabled=technical||!state.connected||state.actionBusy||j?.status!=='review';$('#publishButton').disabled=technical||!state.connected||state.actionBusy||j?.status!=='approved'||!state.config.delivery?.enabled||!state.config.delivery?.configured;$('#reviewActions').hidden=technical;$('#reviewActions').style.display=technical?'none':'';$('#technicalTestNotice').hidden=!technical;$('#reviewEyebrow').textContent=technical?'TECHNICAL TEST / 非正式成片':'FINAL REVIEW';$('#diagnosticReason').textContent=technical?(j.diagnostic_reason||'用于检查同步、GPU 编码和文件交付是否可用，不代表真实素材的剪辑效果。'):'';$('#reviewHelp').textContent=technical?'该测试记录仅供排查技术链路，不能审核为正式成片，也不能推送到企业微信群。':'推送会向已配置的群机器人发送成片文件。网络结果不确定时，请先到群内核实，避免重复发送。';}
 function runtimeSettings(){
   if(localPage){let note=$('#desktopConnectionStatus');if(!note){note=document.createElement('div');note.id='desktopConnectionStatus';note.className='note';$('#connectionForm').before(note);}const runtime=state.connected?'GPU 已连接':state.phase==='checking'?'GPU 连接中':state.phase==='error'?'GPU 连接异常':'GPU 待连接';note.innerHTML='<strong>本地页面已运行</strong><p>连接方式：'+(state.localGateway?'本地自动连接':'手动配置')+'<br>'+runtime+'<br>最近检查：'+esc(state.lastCheckAt?new Date(state.lastCheckAt).toLocaleTimeString('zh-CN',{hour12:false}):'尚未检查')+'<br>上次验证成功：'+esc(state.lastSuccessAt?new Date(state.lastSuccessAt).toLocaleTimeString('zh-CN',{hour12:false}):'尚未验证')+'</p>';}
-  let stale=$('#dataFreshness');if(!stale){stale=document.createElement('p');stale.id='dataFreshness';stale.className='help';$('#connectionBanner').after(stale);}stale.hidden=state.connected||!(state.jobs.length||state.assets.length);stale.textContent='当前显示上次读取的数据 · 待更新；连接恢复前暂停审核和推送。';
+  let stale=$('#dataFreshness');if(!stale){stale=document.createElement('p');stale.id='dataFreshness';stale.className='help';$('#connectionBanner').after(stale);}stale.hidden=state.connected||!(state.jobs.length||state.technicalTests.length||state.assets.length);stale.textContent='当前显示上次读取的数据 · 待更新；连接恢复前暂停审核和推送。';
   updateReviewActions();
 }
 function setConnection(ok,message,phase='error'){
@@ -72,8 +73,10 @@ function refresh(silent=false){
       const [status,assets,jobs,config]=await Promise.all([api('/api/status',{},'json',context),api('/api/assets',{},'json',context),api('/api/jobs',{},'json',context),api('/api/config',{},'json',context)]);
       if(!currentContext(context))return;
       if(typeof status?.worker_running!=='boolean'||typeof status?.execution_target!=='string'||!Array.isArray(assets?.assets)||!Array.isArray(jobs?.jobs)||typeof config?.inbox!=='string'||!assets.assets.every(a=>a&&typeof a.source==='string')||!jobs.jobs.every(j=>j&&typeof j.id==='string'&&typeof j.status==='string'))throw Object.assign(new Error('服务返回的数据不完整，等待重新检查。'),{connectivity:true});
-      state.assets=assets.assets;state.jobs=jobs.jobs;state.config=config;state.executionTarget=status.execution_target;state.lastCheckAt=Date.now();state.lastSuccessAt=state.lastCheckAt;state.reauthAttempted=false;
-      const latest=state.selected&&state.jobs.find(j=>j.id===state.selected.id);if(latest)state.selected={...state.selected,status:latest.status};
+      state.assets=assets.assets;state.jobs=jobs.jobs.filter(j=>!isTechnicalTest(j));state.technicalTestCount=Number.isInteger(status.technical_test_count)&&status.technical_test_count>=0?status.technical_test_count:0;state.config=config;state.executionTarget=status.execution_target;state.lastCheckAt=Date.now();state.lastSuccessAt=state.lastCheckAt;state.reauthAttempted=false;
+      const latest=state.selected&&state.jobs.find(j=>j.id===state.selected.id);
+      if(latest)state.selected={...state.selected,...latest};
+      else if(state.selected&&!isTechnicalTest(state.selected)){state.reviewRequest++;state.selected=null;$('#reviewDialog').close();updateReviewActions();toast('任务列表已更新，请重新打开记录查看。');}
       setConnection(true,config.auto_publish?'自动发布已启用；质量检查通过的任务将按配置推送。':'素材已读取。新建剪辑后，成片会进入审核区，原始素材保持完整。');
       if(state.toastKind==='connection')toast('GPU 连接已恢复。请先查看任务最新状态，再确认是否继续刚才的操作。',false,'recovery');
       const counts=status.counts||{};
@@ -81,18 +84,30 @@ function refresh(silent=false){
       $('#assetBadge').textContent=state.assets.length;$('#jobBadge').textContent=state.jobs.length;
       $('#serviceState').textContent=status.worker_running?(status.execution_target==='remote_gpu'?'远端 GPU 服务运行中':'本地服务运行中'):'工作线程未运行';$('#gpuState').textContent=status.gpu?.available?(status.gpu.name+' · '+Math.round(status.gpu.memory_mb/1024)+' GB'):'当前服务未检测到 GPU';
       $('#wecomState').textContent=status.delivery?.configured?(status.delivery.enabled?'已配置并启用':'已配置 · 尚未启用'):'待配置机器人';
-      $('#inboxPath').textContent=config.inbox;renderAssets();renderJobs();if(typeof refreshCollections==='function'&&$('#page-collections').classList.contains('active'))refreshCollections(true);
+      $('#inboxPath').textContent=config.inbox;renderAssets();renderJobs();if(state.filter==='technical_test')refreshTechnicalTests(true);if(typeof refreshCollections==='function'&&$('#page-collections').classList.contains('active'))refreshCollections(true);
     }catch(error){if(currentContext(context))connectionFailure(context,error);if(!silent)reportError(error);}
   })().finally(()=>{if(state.refreshing===flight)state.refreshing=null;});
   return flight.promise;
 }
-function jobRows(jobs){return jobs.map(j=>`<div class="job-row"><span class="job-icon">▷</span><div class="job-info"><b>${esc(j.title)}</b><small>${esc(date(j.created_at))} · ${esc(j.source)}</small></div><span class="status ${esc(j.status)}">${esc(statusNames[j.status]||j.status)}</span><button class="button subtle" data-review="${esc(j.id)}">${j.has_video?'查看':'详情'}</button></div>`).join('');}
+function jobRows(jobs){return jobs.map(j=>{const technical=isTechnicalTest(j),title=technical?'GPU 链路自测（彩条测试片）':j.title,label=technical?(j.result?.qc?.passed===true?'自测通过':'技术自测记录'):(statusNames[j.status]||j.status);return `<div class="job-row"><span class="job-icon">${technical?'⚙':'▷'}</span><div class="job-info"><b>${esc(title)}</b><small>${technical?'技术自测 · 非正式成片 · ':''}${esc(date(j.created_at))}${technical?'':' · '+esc(j.source)}</small></div><span class="status ${technical?'technical_test':esc(j.status)}">${esc(label)}</span><button class="button subtle" data-review="${esc(j.id)}">${technical?'查看自测记录':j.has_video?'查看':'详情'}</button></div>`;}).join('');}
 function renderJobs(){
-  const filtered=state.jobs.filter(j=>state.filter==='all'||j.status===state.filter);
-  $('#jobsList').innerHTML=filtered.length?jobRows(filtered):'<div class="empty"><span class="empty-icon">▷</span><strong>这里还没有任务</strong><p>从素材库选一个视频，开始第一次剪辑。</p></div>';
-  $('#recentJobs').className=state.jobs.length?'':'empty compact';
-  $('#recentJobs').innerHTML=state.jobs.length?jobRows(state.jobs.slice(0,3)):'<span class="empty-icon">▷</span><strong>第一个好作品，从一段素材开始</strong><p>新建任务，或使用启动器开启文件夹自动处理。</p>';
+  const technical=state.filter==='technical_test',production=state.jobs.filter(j=>!isTechnicalTest(j));
+  const filtered=technical?state.technicalTests:production.filter(j=>state.filter==='all'||j.status===state.filter);
+  const intro=technical?'<div class="note"><strong>技术自测（非成片）</strong><p>以下是保留的链路检查记录，不计入正式任务或成片数量，不提供审核与推送操作。</p></div>':'';
+  const empty=technical?(state.technicalLoading?'正在读取技术自测记录。':state.technicalLoaded?'暂无技术自测记录。':'连接工作台后读取技术自测记录。'):(production.length?'此分类暂无正式任务。':'还没有正式成片。');
+  $('#jobsList').innerHTML=intro+(filtered.length?jobRows(filtered):'<div class="empty"><span class="empty-icon">'+(technical?'⚙':'▷')+'</span><strong>'+empty+'</strong>'+(technical?'':'<p>放入口播/课程/访谈原视频后开始制作。</p>')+'</div>');
+  $('#technicalTestCount').textContent=state.technicalTestCount;
+  $('#recentJobs').className=production.length?'':'empty compact';
+  $('#recentJobs').innerHTML=production.length?jobRows(production.slice(0,3)):'<span class="empty-icon">▷</span><strong>还没有正式成片。</strong><p>放入口播/课程/访谈原视频后开始制作。</p>';
 }
+function refreshTechnicalTests(silent=false){
+  if(!state.connected){renderJobs();if(!silent)toast('连接工作台后可查看技术自测记录。');return Promise.resolve();}
+  if(state.technicalLoading&&currentContext(state.technicalLoading.context))return state.technicalLoading.promise;
+  const flight={context:connectionContext(),promise:null};state.technicalLoading=flight;renderJobs();
+  flight.promise=(async()=>{try{const data=await api('/api/jobs?kind=technical_test',{},'json',flight.context);if(!currentContext(flight.context))return;if(!Array.isArray(data.jobs))throw new Error('技术自测记录格式不完整。');state.technicalTests=data.jobs.filter(isTechnicalTest);state.technicalLoaded=true;const latest=state.selected&&state.technicalTests.find(j=>j.id===state.selected.id);if(latest)state.selected={...state.selected,...latest};updateReviewActions();}catch(error){if(!silent)reportError(error);}})().finally(()=>{if(state.technicalLoading===flight){state.technicalLoading=null;renderJobs();}});
+  return flight.promise;
+}
+function selectJobFilter(filter){state.filter=filter;document.querySelectorAll('[data-filter]').forEach(button=>button.classList.toggle('active',button.dataset.filter===filter));renderJobs();return filter==='technical_test'?refreshTechnicalTests():Promise.resolve();}
 function renderAssets(){
   const selectedSource=$('#sourceSelect').value;
   $('#sourceSelect').innerHTML='<option value="">选择一段素材</option>'+state.assets.map(a=>`<option value="${esc(a.source)}">${esc(a.source)}</option>`).join('');
@@ -106,9 +121,9 @@ function newJob(source=''){
 }
 async function review(id){
   const context=connectionContext(),request=++state.reviewRequest;
-  try{const data=await api('/api/jobs/'+id,{},'json',context);if(request!==state.reviewRequest||!currentContext(context))return;const j=data.job;state.selected=j;$('#reviewTitle').textContent=j.title;
+  try{const data=await api('/api/jobs/'+id,{},'json',context);if(request!==state.reviewRequest||!currentContext(context))return;const j=data.job,technical=isTechnicalTest(j);state.selected=j;$('#reviewTitle').textContent=technical?'GPU 链路自测（彩条测试片）':j.title;
     const warnings=[...(j.plan?.warnings||[]),...(j.result?.qc?.warnings||[])];
-    $('#reviewDetails').innerHTML=`<p><span class="status ${esc(j.status)}">${esc(statusNames[j.status]||j.status)}</span>　预期成片 ${time(j.plan?.duration)} · 保留 ${j.plan?.clips?.length||'—'} 段</p>${j.error?'<div class="note">'+esc(j.error)+'</div>':''}<details><summary>剪辑记录与检查报告</summary><pre>${esc(JSON.stringify({检查:j.result?.qc||'尚未完成',提示:warnings,事件:j.events||[]},null,2))}</pre></details>`;
+    $('#reviewDetails').innerHTML=`<p><span class="status ${technical?'technical_test':esc(j.status)}">${technical?(j.result?.qc?.passed===true?'自测通过':'技术自测记录'):esc(statusNames[j.status]||j.status)}</span>　${technical?'测试输出':'预期成片'} ${time(j.plan?.duration)} · 保留 ${j.plan?.clips?.length||'—'} 段</p>${j.error?'<div class="note">'+esc(j.error)+'</div>':''}<details><summary>${technical?'查看技术检查记录':'剪辑记录与检查报告'}</summary><pre>${esc(JSON.stringify({...(technical?{原记录名称:j.title,源文件:j.source,自测原因:j.diagnostic_reason}:{}),检查:j.result?.qc||'尚未完成',提示:warnings,事件:j.events||[]},null,2))}</pre></details>`;
     updateReviewActions();
     $('#reviewVideo').pause();$('#reviewVideo').removeAttribute('src');$('#reviewVideo').hidden=!j.has_video;
     if(state.videoBlob){URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;}
@@ -125,13 +140,13 @@ document.querySelectorAll('[data-close]').forEach(el=>el.addEventListener('click
 $('#reviewDialog').addEventListener('close',()=>{state.reviewRequest++;$('#reviewVideo').pause();$('#reviewVideo').removeAttribute('src');state.selected=null;if(state.videoBlob)URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;updateReviewActions();});
 $('#connectButton').onclick=()=>showPage('settings');$('#refreshButton').onclick=()=>refresh();$('#scanButton').onclick=()=>refresh();$('#newJobButton').onclick=()=>newJob();$('#newJobButton2').onclick=()=>newJob();
 document.addEventListener('click',event=>{const source=event.target.closest('[data-source]');if(source)newJob(source.dataset.source);const item=event.target.closest('[data-review]');if(item)review(item.dataset.review);});
-document.querySelectorAll('[data-filter]').forEach(el=>el.addEventListener('click',()=>{state.filter=el.dataset.filter;document.querySelectorAll('[data-filter]').forEach(b=>b.classList.toggle('active',b===el));renderJobs();}));
+document.querySelectorAll('[data-filter]').forEach(el=>el.addEventListener('click',()=>selectJobFilter(el.dataset.filter)));
 $('#sourceSelect').onchange=()=>{$('#jobTitle').value=$('#sourceSelect').value.split('/').pop().replace(/\.[^.]+$/,'')+' · 初剪';};
 $('#connectionForm').onsubmit=async event=>{event.preventDefault();try{let value=$('#apiBase').value.trim() || (localPage?location.origin:'');const u=new URL(value);if(u.username||u.password||u.search||u.hash||!['https:','http:'].includes(u.protocol))throw new Error('请使用不含账号、密钥或查询参数的服务地址。');if(u.protocol==='http:'&&!['localhost','127.0.0.1','[::1]'].includes(u.hostname))throw new Error('远程服务必须使用 HTTPS。');nextEpoch();state.base=u.origin;state.token=$('#apiToken').value.trim();state.reauthNeeded=false;state.reauthAttempted=false;setConnection(false,'正在检查服务连接。','checking');await refresh();if(state.connected){$('#apiToken').value='';showPage('overview');toast('工作台已连接。');}}catch(e){reportError(e);}};
-$('#disconnectButton').onclick=()=>{nextEpoch();state.token='';state.reauthNeeded=false;state.reauthAttempted=false;$('#apiToken').value='';state.selected=null;$('#reviewDialog').close();$('#reviewVideo').pause();$('#reviewVideo').removeAttribute('src');if(state.videoBlob)URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;state.jobs=[];state.assets=[];state.config={};if(typeof resetCollections==='function')resetCollections();setConnection(false,'已手动断开连接。','idle');renderAssets();renderJobs();['statAssets','statReview','statPublished','statActive','assetBadge','jobBadge'].forEach(id=>$('#'+id).textContent='—');$('#serviceState').textContent='尚未连接';$('#wecomState').textContent='待配置机器人';$('#inboxPath').textContent='连接服务后读取实际路径';toast('已断开连接，访问令牌已从当前页面清除。');};
+$('#disconnectButton').onclick=()=>{nextEpoch();state.token='';state.reauthNeeded=false;state.reauthAttempted=false;$('#apiToken').value='';state.selected=null;$('#reviewDialog').close();$('#reviewVideo').pause();$('#reviewVideo').removeAttribute('src');if(state.videoBlob)URL.revokeObjectURL(state.videoBlob);state.videoBlob=null;state.jobs=[];state.technicalTests=[];state.technicalTestCount=0;state.technicalLoaded=false;state.assets=[];state.config={};if(typeof resetCollections==='function')resetCollections();setConnection(false,'已手动断开连接。','idle');renderAssets();renderJobs();['statAssets','statReview','statPublished','statActive','assetBadge','jobBadge'].forEach(id=>$('#'+id).textContent='—');$('#serviceState').textContent='尚未连接';$('#wecomState').textContent='待配置机器人';$('#inboxPath').textContent='连接服务后读取实际路径';toast('已断开连接，访问令牌已从当前页面清除。');};
 $('#jobForm').onsubmit=async event=>{event.preventDefault();const button=$('#submitJob');button.disabled=true;try{await api('/api/jobs',{method:'POST',body:JSON.stringify({source:$('#sourceSelect').value,title:$('#jobTitle').value,settings:{...presets[$('#editPreset').value],target_aspect:$('#aspect').value},idempotency_key:crypto.randomUUID()})});$('#jobDialog').close();await refresh();showPage('jobs');toast('任务已加入剪辑队列。');}catch(e){reportError(e);}finally{button.disabled=false;}};
-$('#approveButton').onclick=async()=>{if(!state.selected||!state.connected||state.actionBusy)return;const id=state.selected.id;state.actionBusy=true;updateReviewActions();try{await api('/api/jobs/'+id+'/approve',{method:'POST'});toast('审核已确认。');await refresh();if(state.connected)await review(id);}catch(e){reportError(e);}finally{state.actionBusy=false;updateReviewActions();}};
-$('#publishButton').onclick=async()=>{if(!state.selected||!state.connected||state.actionBusy)return;const id=state.selected.id;state.actionBusy=true;updateReviewActions();try{await api('/api/jobs/'+id+'/publish',{method:'POST'});toast('企业微信已确认接收成片。');await refresh();if(state.connected)await review(id);}catch(e){reportError(e);}finally{state.actionBusy=false;updateReviewActions();}};
+$('#approveButton').onclick=async()=>{if(!state.selected||isTechnicalTest(state.selected)||!state.connected||state.actionBusy)return;const id=state.selected.id;state.actionBusy=true;updateReviewActions();try{await api('/api/jobs/'+id+'/approve',{method:'POST'});toast('审核已确认。');await refresh();if(state.connected)await review(id);}catch(e){reportError(e);}finally{state.actionBusy=false;updateReviewActions();}};
+$('#publishButton').onclick=async()=>{if(!state.selected||isTechnicalTest(state.selected)||!state.connected||state.actionBusy)return;const id=state.selected.id;state.actionBusy=true;updateReviewActions();try{await api('/api/jobs/'+id+'/publish',{method:'POST'});toast('企业微信已确认接收成片。');await refresh();if(state.connected)await review(id);}catch(e){reportError(e);}finally{state.actionBusy=false;updateReviewActions();}};
 $('#downloadPreset').onclick=()=>{const config={...presets.gentle,target_aspect:'original',encoder:'cpu',normalize_audio:true,remove_silence:true,crf:18,fps:30};const url=URL.createObjectURL(new Blob([JSON.stringify(config,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='cutflow-preset.json';a.click();URL.revokeObjectURL(url);toast('剪辑参数已下载，可用作观察器的参数文件。');};
 const fragment=new URLSearchParams(location.hash.slice(1));if(localPage&&fragment.get('token')){state.token=fragment.get('token');history.replaceState(null,'',location.pathname);}
 async function connectDesktop(){

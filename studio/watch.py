@@ -73,6 +73,10 @@ class Watcher:
                     publish_state TEXT NOT NULL DEFAULT 'none', updated_at REAL NOT NULL,
                     owned_by_request INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS diagnostic_sources (
+                    api_url TEXT NOT NULL,source TEXT NOT NULL,registered_at REAL NOT NULL,
+                    PRIMARY KEY(api_url,source)
+                );
             """)
             columns = {row["name"] for row in con.execute("PRAGMA table_info(submissions)")}
             if "owned_by_request" not in columns:
@@ -104,14 +108,26 @@ class Watcher:
             con.execute("UPDATE submissions SET publish_state=?,error=?,updated_at=? WHERE request_key=?",
                         (state, error, time.time(), key))
 
+    def _mark_diagnostic(self, source, key, job_id=None):
+        """Mirror an explicit server classification; never infer from a name."""
+        with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("INSERT OR IGNORE INTO diagnostic_sources VALUES(?,?,?)",(self.api_url,source,time.time()))
+            con.execute("UPDATE submissions SET status='technical_test',publish_state='blocked',error='technical_test_source',job_id=COALESCE(?,job_id),updated_at=? WHERE request_key=?",
+                        (job_id,time.time(),key))
+
     def tick(self, now: float | None = None) -> list[dict]:
         moment = time.time() if now is None else now
         results, seen = [], set()
+        with self.connection() as con:
+            diagnostic_sources = {row["source"] for row in con.execute("SELECT source FROM diagnostic_sources WHERE api_url=?",(self.api_url,))}
         for path in candidate_files(self.inbox):
             if path.suffix.lower() not in VIDEO_EXTENSIONS:
                 continue
             relative = path.relative_to(self.inbox).as_posix()
             seen.add(relative)
+            if relative in diagnostic_sources:
+                continue
             try:
                 stat = path.stat()
                 signature = (stat.st_size, stat.st_mtime_ns)
@@ -136,17 +152,24 @@ class Watcher:
                     con.execute("INSERT OR IGNORE INTO submissions(request_key,source,sha256,settings,updated_at) VALUES(?,?,?,?,?)",
                                 (request_key,relative,digest,self.settings_json,moment))
                     row = con.execute("SELECT * FROM submissions WHERE request_key=?", (request_key,)).fetchone()
-                if row["status"] == "submitted" or row["next_retry"] > moment:
+                if row["status"] in {"submitted","technical_test"} or row["next_retry"] > moment:
                     continue
                 try:
                     response = self._request("POST", "/api/jobs", json={"source": relative, "title": path.stem,
                         "settings": self.settings, "idempotency_key": request_key})
+                    if response.status_code == 409 and response.json().get("code") == "technical_test_source":
+                        self._mark_diagnostic(relative,request_key)
+                        results.append({"source":relative,"status":"technical_test","message":"已登记的技术测试素材已排除正式剪辑队列"})
+                        continue
                     if response.status_code not in (200, 201):
                         raise RuntimeError("api_rejected")
                     body = response.json()
                     job_id = body.get("job", {}).get("id")
                     if not isinstance(job_id, str) or not job_id:
                         raise RuntimeError("invalid_response")
+                    if body.get("job",{}).get("job_kind") == "technical_test":
+                        self._mark_diagnostic(relative,request_key,job_id)
+                        continue
                     owned = body.get("owned_by_request") is True
                     with self.connection() as con:
                         con.execute("UPDATE submissions SET status='submitted',job_id=?,error=NULL,updated_at=?,owned_by_request=?,publish_state=? WHERE request_key=?",
@@ -179,6 +202,10 @@ class Watcher:
                 if response.status_code != 200:
                     continue
                 job = response.json().get("job", {})
+                if job.get("job_kind") == "technical_test":
+                    self._mark_diagnostic(row["source"],key,job_id)
+                    results.append({"job_id":job_id,"status":"technical_test","message":"技术测试记录已停止自动审批和发布"})
+                    continue
                 status = job.get("status")
                 if status == "published":
                     self._mark(key, "published")

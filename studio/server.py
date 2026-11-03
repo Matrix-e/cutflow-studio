@@ -16,7 +16,7 @@ import subprocess
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -259,7 +259,10 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
 
     @app.exception_handler(StateConflict)
     async def conflict_handler(request, exc):
-        return JSONResponse(status_code=409, content={"detail": str(exc)})
+        content = {"detail": str(exc)}
+        if getattr(exc,"code",None) == "technical_test_source":
+            content["code"] = "technical_test_source"
+        return JSONResponse(status_code=409, content=content)
 
     @app.get("/api/health")
     def health():
@@ -274,6 +277,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     @app.get("/api/status", dependencies=[Depends(authorize)])
     def status():
         return {"version": __version__, "counts": store.counts(), "worker_running": bool(worker.thread and worker.thread.is_alive()),
+                "technical_test_count": sum(store.counts(kind="technical_test").values()),
                 "ffmpeg_available": shutil.which("ffmpeg") is not None, "ffprobe_available": shutil.which("ffprobe") is not None,
                 "delivery": delivery_state(), "review_required": True, "gpu": gpu_status,
                 "execution_target": os.getenv("CUTFLOW_EXECUTION_TARGET", "local")}
@@ -281,6 +285,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     @app.get("/api/assets", dependencies=[Depends(authorize)])
     def assets():
         found = []
+        diagnostic_sources = store.technical_test_sources()
         for path in inbox_path.rglob("*"):
             if len(found) >= 1000:
                 break
@@ -289,6 +294,8 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
             try:
                 relative = path.relative_to(inbox_path).as_posix()
                 checked = safe_source(inbox_path, relative)
+                if checked.relative_to(inbox_path).as_posix() in diagnostic_sources:
+                    continue
                 stat = checked.stat()
             except (ValueError, OSError):
                 continue
@@ -298,8 +305,8 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         return {"assets": sorted(found, key=lambda item: item["modified_ns"], reverse=True), "limit": 1000}
 
     @app.get("/api/jobs", dependencies=[Depends(authorize)])
-    def jobs(limit: int = Query(default=100, ge=1, le=500)):
-        return {"jobs": [public_job(job) for job in store.list(limit)]}
+    def jobs(limit: int = Query(default=100, ge=1, le=500), kind: Literal["production","technical_test"] = "production"):
+        return {"jobs": [public_job(job) for job in store.list(limit, kind=kind)]}
 
     @app.post("/api/jobs", dependencies=[Depends(authorize)])
     def new_job(body: NewJob, idempotency_key: str | None = Header(default=None)):
@@ -348,6 +355,8 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     @app.post("/api/jobs/{job_id}/approve", dependencies=[Depends(authorize)])
     def approve(job_id: str):
         job = get_job(job_id)
+        if job["job_kind"] == "technical_test":
+            raise HTTPException(409, "这是技术测试记录，不能确认为可发布的正式成片")
         if job["status"] in {"approved", "published"}:
             return {"job": public_job(job)}
         if (job.get("result") or {}).get("qc", {}).get("passed") is not True:
@@ -358,6 +367,8 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     @app.post("/api/jobs/{job_id}/retry", dependencies=[Depends(authorize)])
     def retry(job_id: str):
         job = get_job(job_id)
+        if job["job_kind"] == "technical_test":
+            raise HTTPException(409, "技术测试记录不能作为正式视频重新剪辑")
         if job["status"] != "failed":
             raise HTTPException(409, "只有失败的剪辑任务可以重新排队")
         if job.get("publication") is not None or any(event["status"] == "publishing" for event in store.events(job_id)):
@@ -377,6 +388,8 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     @app.post("/api/jobs/{job_id}/publish", dependencies=[Depends(authorize)])
     def publish(job_id: str):
         job = get_job(job_id)
+        if job["job_kind"] == "technical_test":
+            raise HTTPException(409, "技术测试记录不能发布为正式视频")
         if job["status"] == "published":
             return {"job": public_job(job), "already_published": True}
         if job["status"] != "approved":
