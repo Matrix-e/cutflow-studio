@@ -5,7 +5,7 @@ const downloadStatus={downloaded:'已下载到本机',not_requested:'参考链�
 const rightsNames={unknown:'待确认',owned:'自有素材',licensed:'已有授权',reference:'仅作参考'};
 function resetCollections(){collectionState={tasks:[],items:[],busy:false};$('#collectionTasks').innerHTML='<div class="empty compact"><p>连接工作台后读取任务。</p></div>';$('#collectionItems').innerHTML='<div class="empty compact"><p>连接工作台后读取采集结果。</p></div>';$('#browserCollectorStatus').textContent='尚未连接';$('#collectionTaskCount').textContent='—';$('#collectionItemCount').textContent='—';$('#collectionTaskFilter').innerHTML='<option value="">全部关键词</option>';}
 async function refreshCollections(silent=false){
- if(!state.connected){if(!silent)toast('先连接工作台，再管理采集任务。',true);return;}
+ if(!state.connected){if(!silent)toast('先连接工作台，再管理采集任务。',true,'connection');return;}
  if(collectionState.busy)return;
  collectionState.busy=true;
  const base=state.base,token=state.token;
@@ -17,7 +17,7 @@ async function refreshCollections(silent=false){
  $('#browserCollectorStatus').textContent=({online:'本机采集器已连接',offline:'本机采集器已离线',local_agent_required:'等待启动本机采集器'})[config.browser?.status]||'等待本机采集器';
  const selected=$('#collectionTaskFilter').value;$('#collectionTaskFilter').innerHTML='<option value="">全部关键词</option>'+tasks.tasks.map(t=>'<option value="'+esc(t.id)+'">'+esc(t.keyword)+'</option>').join('');$('#collectionTaskFilter').value=selected;
  renderCollections();
- }catch(e){if(!silent)toast(e.message,true);}finally{collectionState.busy=false;}
+ }catch(e){if(!silent)reportError(e);}finally{collectionState.busy=false;}
 }
 function renderCollections(){
  $('#collectionTaskCount').textContent=collectionState.tasks.length+' 个';$('#collectionItemCount').textContent=collectionState.items.length+' 条';
@@ -26,8 +26,8 @@ function renderCollections(){
 }
 $('#refreshCollections').onclick=()=>refreshCollections();
 $('#collectionTaskFilter').onchange=()=>refreshCollections();$('#collectionRightsFilter').onchange=()=>refreshCollections();
-$('#collectionTaskForm').onsubmit=async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;try{const frequency=Number($('#collectionFrequency').value);await api('/api/collections/tasks',{method:'POST',body:JSON.stringify({keyword:$('#collectionKeyword').value.trim(),provider:'browser',enabled:frequency>0,interval_seconds:frequency||21600,max_items:Number($('#collectionLimit').value)})});$('#collectionKeyword').value='';await refreshCollections();toast('关键词已保存；定时采集需要本机采集器保持运行。');}catch(err){toast(err.message,true);}finally{b.disabled=false;}};
-$('#collectionImportForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/collections/items/import',{method:'POST',body:JSON.stringify({source_url:$('#collectionSourceUrl').value.trim(),title:$('#collectionSourceTitle').value.trim()})});e.target.reset();await refreshCollections();toast('参考链接已保存。');}catch(err){toast(err.message,true);}};
-document.addEventListener('click',async e=>{const button=e.target.closest('[data-collect-run],[data-collect-toggle],[data-collect-filter]');if(!button)return;button.disabled=true;try{if(button.dataset.collectFilter){$('#collectionTaskFilter').value=button.dataset.collectFilter;}else if(button.dataset.collectRun){await api('/api/collections/tasks/'+button.dataset.collectRun+'/run',{method:'POST'});toast('任务已排队，等待本机浏览器采集器执行。');}else{const task=collectionState.tasks.find(t=>t.id===button.dataset.collectToggle);await api('/api/collections/tasks/'+task.id,{method:'PATCH',body:JSON.stringify({enabled:!task.enabled})});}await refreshCollections();}catch(err){toast(err.message,true);}finally{button.disabled=false;}});
-document.addEventListener('change',async e=>{if(!e.target.dataset.collectRights)return;try{await api('/api/collections/items/'+e.target.dataset.collectRights,{method:'PATCH',body:JSON.stringify({rights_status:e.target.value})});toast('使用标记已保存。');}catch(err){toast(err.message,true);await refreshCollections();}});
+$('#collectionTaskForm').onsubmit=async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;try{const frequency=Number($('#collectionFrequency').value);await api('/api/collections/tasks',{method:'POST',body:JSON.stringify({keyword:$('#collectionKeyword').value.trim(),provider:'browser',enabled:frequency>0,interval_seconds:frequency||21600,max_items:Number($('#collectionLimit').value)})});$('#collectionKeyword').value='';await refreshCollections();toast('关键词已保存；定时采集需要本机采集器保持运行。');}catch(err){reportError(err);}finally{b.disabled=false;}};
+$('#collectionImportForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/collections/items/import',{method:'POST',body:JSON.stringify({source_url:$('#collectionSourceUrl').value.trim(),title:$('#collectionSourceTitle').value.trim()})});e.target.reset();await refreshCollections();toast('参考链接已保存。');}catch(err){reportError(err);}};
+document.addEventListener('click',async e=>{const button=e.target.closest('[data-collect-run],[data-collect-toggle],[data-collect-filter]');if(!button)return;button.disabled=true;try{if(button.dataset.collectFilter){$('#collectionTaskFilter').value=button.dataset.collectFilter;}else if(button.dataset.collectRun){await api('/api/collections/tasks/'+button.dataset.collectRun+'/run',{method:'POST'});toast('任务已排队，等待本机浏览器采集器执行。');}else{const task=collectionState.tasks.find(t=>t.id===button.dataset.collectToggle);await api('/api/collections/tasks/'+task.id,{method:'PATCH',body:JSON.stringify({enabled:!task.enabled})});}await refreshCollections();}catch(err){reportError(err);}finally{button.disabled=false;}});
+document.addEventListener('change',async e=>{if(!e.target.dataset.collectRights)return;try{await api('/api/collections/items/'+e.target.dataset.collectRights,{method:'PATCH',body:JSON.stringify({rights_status:e.target.value})});toast('使用标记已保存。');}catch(err){reportError(err);await refreshCollections();}});
 

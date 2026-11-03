@@ -1,9 +1,12 @@
 """Adversarial local gateway checks. All upstream traffic uses a mock transport."""
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import anyio
 import httpx
 from fastapi.testclient import TestClient
 
@@ -21,6 +24,12 @@ class MemoryStream(httpx.AsyncByteStream):
         self.closed = True
 
 
+class BrokenStream(MemoryStream):
+    async def __aiter__(self):
+        yield self.payload[:2]
+        raise httpx.ReadError('sensitive upstream transport details must not escape')
+
+
 class LocalGatewayTests(unittest.TestCase):
     GPU_TOKEN = "gpu-private-token-for-test"
     LOCAL_TOKEN = "local-browser-token-for-test"
@@ -35,15 +44,23 @@ class LocalGatewayTests(unittest.TestCase):
         self.calls = []
         self.streams = []
         self.response_mode = "normal"
+        self.failures = []
 
-        def response(status,payload,headers=None):
-            stream = MemoryStream(payload)
+        def response(status,payload,headers=None,broken=False):
+            stream = BrokenStream(payload) if broken else MemoryStream(payload)
             self.streams.append(stream)
             return httpx.Response(status,headers={"Content-Length":str(len(payload)),**(headers or {})},stream=stream)
 
         async def upstream(request):
             body = await request.aread()
-            self.calls.append({"method":request.method,"url":str(request.url),"headers":dict(request.headers),"body":body})
+            self.calls.append({"method":request.method,"url":str(request.url),"headers":dict(request.headers),"body":body,
+                               "timeout":request.extensions.get('timeout')})
+            if self.failures:
+                raise self.failures.pop(0)
+            if self.response_mode=="stall":
+                await anyio.sleep(60)
+            if self.response_mode=="brief_stall":
+                await anyio.sleep(0.03)
             if self.response_mode=="redirect":
                 return response(302,b"redirect",{"Location":"https://evil.example/steal","Set-Cookie":"remote=secret"})
             if self.response_mode=="timeout":
@@ -52,6 +69,10 @@ class LocalGatewayTests(unittest.TestCase):
                 return response(500,("private traceback "+self.GPU_TOKEN).encode(),{"Content-Type":"text/plain"})
             if self.response_mode=="range":
                 return response(206,b"clip",{"Content-Type":"video/mp4","Content-Range":"bytes 0-3/10","Accept-Ranges":"bytes"})
+            if self.response_mode=="video_body_error":
+                return response(206,b"clip",{"Content-Type":"video/mp4","Content-Range":"bytes 0-3/10"},broken=True)
+            if self.response_mode in {"body_error","body_error_once"} and (self.response_mode=="body_error" or len(self.calls)==1):
+                return response(200,b'{"ok":true}',{"Content-Type":"application/json"},broken=True)
             return response(200,b'{"ok":true}',{"Content-Type":"application/json","Access-Control-Allow-Origin":"*","Set-Cookie":"remote=secret","X-Upstream-Private":"private","Location":"https://evil.example/ignored"})
 
         self.app = create_app(gpu_token=self.GPU_TOKEN,local_token=self.LOCAL_TOKEN,
@@ -181,6 +202,7 @@ class LocalGatewayTests(unittest.TestCase):
         self.assertNotIn(self.GPU_TOKEN,response.text)
         self.assertNotIn("private traceback",response.text)
         self.assertTrue(self.streams[-1].closed)
+        self.assertEqual(len(self.calls),1)
 
     def test_unsupported_method_and_oversized_body_do_not_reach_gpu(self):
         self.assert_rejected_without_upstream("DELETE","/api/jobs",headers=self.auth)
@@ -194,6 +216,116 @@ class LocalGatewayTests(unittest.TestCase):
         self.assertEqual(response.headers["content-range"],"bytes 0-3/10")
         self.assertEqual(self.calls[0]["headers"]["range"],"bytes=0-3")
         self.assertTrue(self.streams[-1].closed)
+
+    def test_safe_get_recovers_once_from_each_transient_transport_class(self):
+        for kind in (httpx.ConnectError,httpx.ConnectTimeout,httpx.ReadError,httpx.ReadTimeout,httpx.RemoteProtocolError):
+            with self.subTest(error=kind.__name__):
+                self.calls.clear()
+                self.failures = [kind("must not leak "+self.GPU_TOKEN)]
+                with self.assertLogs('cutflow.local_gateway',level='WARNING') as logs:
+                    response = self.client.get('/api/jobs/job1',headers=self.auth)
+                self.assertEqual(response.status_code,200,response.text)
+                self.assertEqual(len(self.calls),2)
+                self.assertIn('retrying=True',' '.join(logs.output))
+                self.assertNotIn(self.GPU_TOKEN,' '.join(logs.output))
+
+    def test_get_retry_stops_after_two_attempts_with_specific_error_code(self):
+        for kind,code,status in ((httpx.ConnectError,'upstream_unavailable',503),
+                                 (httpx.ReadTimeout,'upstream_timeout',504),
+                                 (httpx.RemoteProtocolError,'upstream_protocol_error',502)):
+            with self.subTest(error=kind.__name__):
+                self.calls.clear()
+                self.failures = [kind('private') for _ in range(3)]
+                with self.assertLogs('cutflow.local_gateway',level='WARNING'):
+                    response = self.client.get('/api/jobs/job1',headers=self.auth)
+                self.assertEqual(response.status_code,status)
+                self.assertEqual(response.json()['code'],code)
+                self.assertTrue(response.json()['retryable'])
+                self.assertEqual(len(self.calls),2)
+                self.assertEqual(len(self.failures),1)
+                self.assertNotIn('GPU 暂未连接',response.text)
+
+    def test_publish_and_patch_are_never_retried(self):
+        for method,path in (('POST','/api/jobs/job1/publish'),('PATCH','/api/collections/tasks/task1')):
+            for kind in (httpx.ConnectError,httpx.ReadTimeout,httpx.RemoteProtocolError):
+                with self.subTest(method=method,error=kind.__name__):
+                    self.calls.clear()
+                    self.failures = [kind('private'),kind('must remain unconsumed')]
+                    with self.assertLogs('cutflow.local_gateway',level='WARNING'):
+                        response = self.client.request(method,path,headers=self.auth,json={})
+                    self.assertIn(response.status_code,(502,503,504))
+                    self.assertFalse(response.json()['retryable'])
+                    self.assertEqual(len(self.calls),1)
+                    self.assertEqual(len(self.failures),1)
+                    self.assertIn('结果尚未确认',response.json()['detail'])
+
+    def test_interrupted_json_get_body_retries_before_reply_and_closes_failed_stream(self):
+        self.response_mode = 'body_error_once'
+        with self.assertLogs('cutflow.local_gateway',level='WARNING'):
+            response = self.client.get('/api/jobs/job1',headers=self.auth)
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json(),{'ok':True})
+        self.assertEqual(len(self.calls),2)
+        self.assertTrue(all(stream.closed for stream in self.streams))
+
+    def test_interrupted_write_body_is_not_replayed(self):
+        self.response_mode = 'body_error'
+        with self.assertLogs('cutflow.local_gateway',level='WARNING'):
+            response = self.client.post('/api/jobs/job1/publish',headers=self.auth)
+        self.assertEqual(response.status_code,503)
+        self.assertFalse(response.json()['retryable'])
+        self.assertEqual(len(self.calls),1)
+        self.assertTrue(self.streams[0].closed)
+
+    def test_safe_logs_include_route_shape_not_query_id_or_exception_text(self):
+        self.failures = [httpx.RemoteProtocolError('private '+self.GPU_TOKEN)]*2
+        with self.assertLogs('cutflow.local_gateway',level='WARNING') as logs:
+            self.client.get('/api/jobs/sensitive-identifier?secret=query-private',headers=self.auth)
+        text = ' '.join(logs.output)
+        self.assertIn('error_class=RemoteProtocolError',text)
+        self.assertIn('method=GET route=/api/jobs/{id}',text)
+        for secret in (self.GPU_TOKEN,self.LOCAL_TOKEN,'sensitive-identifier','query-private','private '):
+            self.assertNotIn(secret,text)
+
+    def test_api_video_and_publish_have_distinct_read_budgets(self):
+        self.client.get('/api/status',headers=self.auth)
+        self.assertEqual(self.calls[-1]['timeout']['read'],8)
+        self.response_mode='range'
+        self.client.get('/api/jobs/job1/video',headers=self.auth)
+        self.assertEqual(self.calls[-1]['timeout']['read'],300)
+        self.response_mode='normal'
+        previous=len(self.calls)
+        self.client.post('/api/jobs/job1/publish',headers=self.auth)
+        self.assertEqual(len(self.calls)-previous,1)
+        self.assertEqual(self.calls[-1]['timeout']['read'],290)
+
+    def test_metadata_attempt_deadline_bounds_connect_and_full_body_time(self):
+        self.response_mode='stall'
+        started=time.monotonic()
+        with patch('studio.local_gateway.ATTEMPT_DEADLINE_SECONDS',0.01),self.assertLogs('cutflow.local_gateway',level='WARNING'):
+            response=self.client.get('/api/jobs/job1',headers=self.auth)
+        self.assertEqual(response.status_code,504)
+        self.assertEqual(response.json()['code'],'upstream_timeout')
+        self.assertEqual(len(self.calls),2)
+        self.assertLess(time.monotonic()-started,1)
+
+    def test_publish_keeps_its_long_single_attempt_deadline(self):
+        self.response_mode='brief_stall'
+        with patch('studio.local_gateway.ATTEMPT_DEADLINE_SECONDS',0.01):
+            response=self.client.post('/api/jobs/job1/publish',headers=self.auth)
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.calls[0]['timeout']['read'],290)
+
+    def test_partial_video_stream_is_never_replayed_and_raw_error_is_hidden(self):
+        self.response_mode='video_body_error'
+        with self.assertLogs('cutflow.local_gateway',level='WARNING') as logs:
+            with self.assertRaisesRegex(RuntimeError,'GPU video stream interrupted') as raised:
+                self.client.get('/api/jobs/job1/video',headers=self.auth)
+        self.assertEqual(len(self.calls),1)
+        self.assertTrue(self.streams[0].closed)
+        self.assertNotIn('sensitive upstream',str(raised.exception))
+        self.assertIn('stage=video_stream retrying=False',' '.join(logs.output))
 
     def test_static_site_and_health_never_contact_gpu_or_expose_files(self):
         self.assertIn("Local studio",self.client.get("/").text)
