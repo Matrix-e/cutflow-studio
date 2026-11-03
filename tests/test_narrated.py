@@ -70,14 +70,23 @@ class NarratedIntegrationTests(unittest.TestCase):
         self.assertLess(max(y for x,y in pixels),610)
 
     def test_explicit_loop_complete_voice_subtitles_music_and_decode(self):
+        stages = []
         with patch("studio.narrated.narration.synthesize", side_effect=self.voice):
             plan = narrated.build_narrated_plan([str(self.source)], "完整讲稿。", "serena",
                                                {"visual_fill": "loop", "music": True, "target_duration": 1, "opening_title": "一次真实讨论"}, self.settings,
-                                               work_dir=self.folder / "job")
+                                               work_dir=self.folder / "job", on_stage=stages.append)
+        self.assertEqual(stages, ["preparing_voice", "planning_visuals"])
         self.assertEqual(plan["duration"], 3)
         self.assertTrue(plan["loop_visuals"])
         self.assertEqual([c["visual_cycle"] for c in plan["clips"]], [0, 1])
-        report = narrated.render_narrated_plan(plan, self.folder / "finished.mp4")
+        original_check = narrated.media._check_output
+        def check_after_stage(path, *args):
+            if path.parent.name.startswith(".cutflow-narrated-"):
+                self.assertEqual(stages[-1], "checking")
+            return original_check(path, *args)
+        with patch("studio.narrated.media._check_output", side_effect=check_after_stage):
+            report = narrated.render_narrated_plan(plan, self.folder / "finished.mp4", on_stage=stages.append)
+        self.assertEqual(stages, ["preparing_voice", "planning_visuals", "compositing", "checking"])
         self.assertTrue(report["qc"]["passed"])
         self.assertTrue(report["qc"]["narration_complete_duration"])
         self.assertEqual(plan["visual_plan"]["resolved"]["opening_title"], "")
@@ -120,11 +129,13 @@ class NarratedIntegrationTests(unittest.TestCase):
 
     def test_verified_prepared_voice_is_reused_and_mismatched_script_rejected(self):
         text = "讲稿。"
+        stages = []
         prepared = {**self.voice(text, "serena", self.folder / "voice.wav"), "voice_id": "serena", "style": "professional",
                     "script_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
         with patch("studio.narrated.narration.synthesize") as synthesize:
             plan = narrated.build_narrated_plan([str(self.source), str(self.source)], text, "serena", settings=self.settings,
-                                               work_dir=self.folder / "prepared", prepared_narration=prepared)
+                                               work_dir=self.folder / "prepared", prepared_narration=prepared, on_stage=stages.append)
+            self.assertEqual(stages, ["planning_visuals"])
             self.assertEqual(plan["narration"]["sha256"], prepared["sha256"])
             self.assertEqual(plan["narration_duration"], 3)
             synthesize.assert_not_called()
@@ -132,6 +143,14 @@ class NarratedIntegrationTests(unittest.TestCase):
                 with self.subTest(changed=changed), self.assertRaises(narrated.NarratedError):
                     narrated.build_narrated_plan([str(self.source)], text, "serena", settings=self.settings,
                                                 work_dir=self.folder / "invalid", prepared_narration={**prepared, **changed})
+
+    def test_failed_stage_callback_stops_before_spending_gpu_time(self):
+        def unavailable(stage):
+            raise RuntimeError("状态保存失败")
+        with patch("studio.narrated.narration.synthesize") as synthesize, self.assertRaisesRegex(RuntimeError, "状态保存失败"):
+            narrated.build_narrated_plan([str(self.source)], "讲稿。", "serena", settings=self.settings,
+                                        work_dir=self.folder / "callback", on_stage=unavailable)
+        synthesize.assert_not_called()
 
 
 if __name__ == "__main__":

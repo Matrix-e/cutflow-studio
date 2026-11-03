@@ -37,13 +37,19 @@ class ProductionTests(unittest.TestCase):
         self.temp.cleanup()
 
     @staticmethod
-    def plan(paths, spoken_script, voice_id, options, settings, *, work_dir, stop_event):
+    def plan(paths, spoken_script, voice_id, options, settings, *, work_dir, stop_event, on_stage=None):
+        if on_stage:
+            on_stage('preparing_voice')
+            on_stage('planning_visuals')
         Path(work_dir, 'narration.wav').write_bytes(b'full-speech')
         return {'kind': 'narrated_composition', 'duration': 18.2, 'narration': {'duration': 18.2},
                 'sources': paths, 'resolved': options, 'warnings': ['按完整语音时长制作。']}
 
     @staticmethod
-    def render_video(plan, output, settings):
+    def render_video(plan, output, settings, on_stage=None):
+        if on_stage:
+            on_stage('compositing')
+            on_stage('checking')
         Path(output).write_bytes(b'complete-narrated-video')
         return {'output_path': output, 'duration': 18.2, 'qc': {'passed': True}, 'warnings': []}
 

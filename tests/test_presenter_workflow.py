@@ -73,7 +73,10 @@ class PresenterWorkflowTests(unittest.TestCase):
             self.assertTrue(Path(paths[0]).is_file())
             self.assertEqual(options['source_audio'],'mute')
             return {'narration':kwargs['prepared_narration'],'duration':2.0,'warnings':[]}
-        def render(plan,output,settings):
+        def render(plan,output,settings,on_stage=None):
+            if on_stage:
+                on_stage('compositing')
+                on_stage('checking')
             Path(output).write_bytes(b'final-video')
             return {'qc':{'passed':True},'duration':2.0}
         with patch('studio.presenter.configuration_status',return_value=self.caps), patch('studio.narration.configuration_status',return_value={'configured':True}), patch('studio.narration.synthesize',side_effect=voice) as synth, patch('studio.presenter.render_presenter',side_effect=animate), patch('studio.narrated.build_narrated_plan',side_effect=plan), patch('studio.narrated.render_narrated_plan',side_effect=render):

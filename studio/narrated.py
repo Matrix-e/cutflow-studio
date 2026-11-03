@@ -53,7 +53,7 @@ def _visual_timeline(base, frames):
 
 def build_narrated_plan(paths: list[str], spoken_script: str, voice_id: str, options: dict | None = None,
                         settings: dict | None = None, *, work_dir: str | Path, stop_event=None,
-                        prepared_narration: dict | None = None) -> dict:
+                        prepared_narration: dict | None = None, on_stage=None) -> dict:
     """Synthesize first; the resulting actual speech duration determines video."""
     opts = _options(options)
     narration._validate(spoken_script, voice_id, opts["voice_style"])
@@ -65,6 +65,8 @@ def build_narrated_plan(paths: list[str], spoken_script: str, voice_id: str, opt
     # Validate all video inputs before spending GPU time on synthesis.
     base = creative.build_creation_plan(paths, "", base_options, cfg)
     if prepared_narration is None:
+        if on_stage is not None:
+            on_stage("preparing_voice")
         audio = narration.synthesize(spoken_script, voice_id, work / "narration.wav", style=opts["voice_style"], stop_event=stop_event)
     else:
         try:
@@ -82,6 +84,8 @@ def build_narrated_plan(paths: list[str], spoken_script: str, voice_id: str, opt
             raise NarratedError("已有旁白与讲稿、声音或文件记录不一致，请重新生成。") from exc
     if not audio.get("qc", {}).get("passed"):
         raise NarratedError("旁白音频未通过检查。")
+    if on_stage is not None:
+        on_stage("planning_visuals")
     creative._unchanged(base["sources"])
     fps = base["settings"]["fps"]
     frames = math.ceil(audio["duration"] * fps - 1e-8)
@@ -158,7 +162,7 @@ def _subtitle_filter(path: Path, width: int, height: int, ass_path: Path) -> str
     return f"ass=filename='{creative._filter_path(ass_path)}':fontsdir='{creative._filter_path(font.parent)}'"
 
 
-def render_narrated_plan(plan: dict, output_path: str | Path, settings: dict | None = None) -> dict:
+def render_narrated_plan(plan: dict, output_path: str | Path, settings: dict | None = None, *, on_stage=None) -> dict:
     if plan.get("kind") != "narrated_composition":
         raise NarratedError("独白视频方案无效。")
     destination = Path(output_path).resolve()
@@ -178,6 +182,8 @@ def render_narrated_plan(plan: dict, output_path: str | Path, settings: dict | N
     if duration + 1e-6 < plan["narration_duration"]:
         raise NarratedError("成片时长不能短于完整旁白。")
     warnings = list(plan["warnings"])
+    if on_stage is not None:
+        on_stage("compositing")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".cutflow-narrated-", dir=destination.parent) as scratch:
         folder = Path(scratch)
@@ -237,6 +243,8 @@ def render_narrated_plan(plan: dict, output_path: str | Path, settings: dict | N
         args += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-t", f"{duration:.6f}",
                  "-map_metadata", "-1", "-movflags", "+faststart", str(staged)]
         media._run(args, max(300, duration * 10))
+        if on_stage is not None:
+            on_stage("checking")
         qc = media._check_output(staged, {"duration": duration, "settings": cfg, "source_info": {"has_audio": True}}, width, height)
         metadata = media.inspect_media(staged)
         qc["narration_complete_duration"] = min(metadata["duration"], metadata.get("audio_duration") or 0) + 1e-6 >= plan["narration_duration"]

@@ -104,6 +104,16 @@ class LocalGatewayTests(unittest.TestCase):
         self.assertNotIn("access-control-allow-origin",response.headers)
         self.assertEqual(self.calls,[])
 
+    def test_knowledge_put_proxies_once_with_auth_and_rejects_cross_origin(self):
+        body = {'favorite': True, 'notes': '好开场', 'expected_revision': 0}
+        response = self.client.put('/api/knowledge/'+'a'*32, headers=self.auth, json=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]['method'], 'PUT')
+        self.assertEqual(json.loads(self.calls[0]['body']), body)
+        self.assert_rejected_without_upstream('PUT', '/api/knowledge/'+'a'*32,
+            headers={**self.auth, 'Origin': 'https://untrusted.example'}, json=body)
+
     def test_session_requires_non_simple_custom_header(self):
         self.assert_rejected_without_upstream("GET","/local-session")
         self.assert_rejected_without_upstream("GET","/local-session",headers={"X-CutFlow-Local":"0"})

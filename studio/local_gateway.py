@@ -114,7 +114,7 @@ def create_app(*, gpu_token: str, local_token: str | None = None,
                 or origin is not None and origin != 'http://' + host
                 or fetch_site is not None and fetch_site not in {'same-origin', 'none'}):
             response = JSONResponse({'detail': '仅允许从本机工作台访问。'}, status_code=403)
-        elif request.method not in {'GET', 'HEAD', 'POST', 'PATCH'}:
+        elif request.method not in {'GET', 'HEAD', 'POST', 'PATCH', 'PUT'}:
             response = JSONResponse({'detail': '不支持此请求方式。'}, status_code=405)
         else:
             response = await call_next(request)
@@ -195,7 +195,7 @@ def create_app(*, gpu_token: str, local_token: str | None = None,
         except (OSError, ImportProblem):
             return JSONResponse({'detail': '暂时无法打开素材目录，请检查目录是否可访问。'}, status_code=503)
 
-    @app.api_route('/api/{path:path}', methods=['GET', 'POST', 'PATCH'])
+    @app.api_route('/api/{path:path}', methods=['GET', 'POST', 'PATCH', 'PUT'])
     async def proxy(path: str, request: Request):
         portrait_image = request.method == 'GET' and re.fullmatch(r'presenters/[A-Za-z0-9_-]+/image', path) is not None
         media_get = request.method == 'GET' and (path == 'assets/video' or re.fullmatch(r'jobs/[A-Za-z0-9_-]+/video', path) is not None or portrait_image)

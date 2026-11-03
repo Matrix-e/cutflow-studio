@@ -129,6 +129,11 @@ class Store:
             return [dict(row) for row in conn.execute(
                 "SELECT created_at,status,message FROM events WHERE job_id=? ORDER BY id", (job_id,))]
 
+    def queue_position(self, job_id: str):
+        with self.connection() as conn:
+            ids = [row[0] for row in conn.execute("SELECT id FROM jobs WHERE status='queued' AND job_kind='production' ORDER BY created_at")]
+        return ids.index(job_id) + 1 if job_id in ids else None
+
     def counts(self, kind: str = "production"):
         if kind not in {"production", "technical_test", "all"}:
             raise ValueError("Invalid job kind")
@@ -171,7 +176,7 @@ class Store:
 
     def create(self, *, source: str, title: str, settings: dict, fingerprint: str,
                source_size: int, source_mtime_ns: int, idempotency_key: str | None = None,
-               production: dict | None = None):
+               production: dict | None = None, allow_active_merge: bool = True):
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._check_diagnostic_sources(conn, source, settings)
@@ -184,7 +189,7 @@ class Store:
             previous = conn.execute(
                 "SELECT * FROM jobs WHERE fingerprint=? AND status IN ('queued','analyzing','rendering') LIMIT 1",
                 (fingerprint,)).fetchone()
-            if previous:
+            if previous and allow_active_merge:
                 return self.decode(previous), False
             job_id, timestamp = uuid.uuid4().hex, now()
             conn.execute("""INSERT INTO jobs

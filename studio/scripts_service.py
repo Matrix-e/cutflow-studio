@@ -42,6 +42,15 @@ class NewScript(BaseModel):
     brand: BrandDetails = Field(default_factory=BrandDetails)
     subtype: Literal['corporate', 'salon_promo', 'salon_recap'] = 'salon_promo'
     target_duration: float | None = Field(default=None, ge=1, le=3600, allow_inf_nan=False)
+    reference_ids: list[UUID] = Field(default_factory=list, max_length=3)
+    rewrite_source_id: UUID | None = None
+
+    @field_validator('reference_ids')
+    @classmethod
+    def unique_references(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError('同一参考作品不能重复选择')
+        return value
 
     @field_validator('brief')
     @classmethod
@@ -69,6 +78,8 @@ class ScriptStore:
                 source_names TEXT NOT NULL, status TEXT NOT NULL, result TEXT, error TEXT,
                 error_code TEXT, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             ); CREATE INDEX IF NOT EXISTS scripts_queue ON scripts(status,created_at);''')
+            if 'resolved_context' not in {row['name'] for row in conn.execute('PRAGMA table_info(scripts)')}:
+                conn.execute("ALTER TABLE scripts ADD COLUMN resolved_context TEXT NOT NULL DEFAULT '{}'")
 
     @contextmanager
     def connection(self):
@@ -91,13 +102,20 @@ class ScriptStore:
         record.pop('fingerprint', None)
         record.update(json.loads(record.pop('request_json')))
         record['source_names'] = json.loads(record['source_names'])
+        record['resolved_context'] = json.loads(record.get('resolved_context') or '{}')
         record['result'] = json.loads(record['result']) if record['result'] else None
         record['can_retry'] = record['status'] == 'failed'
         return record
 
     @staticmethod
     def fingerprint(request):
-        return hashlib.sha256(json.dumps(request, sort_keys=True, ensure_ascii=False,
+        # Empty v0.8 additions must not invalidate older persisted request IDs.
+        canonical = dict(request)
+        if not canonical.get('reference_ids'):
+            canonical.pop('reference_ids', None)
+        if canonical.get('rewrite_source_id') is None:
+            canonical.pop('rewrite_source_id', None)
+        return hashlib.sha256(json.dumps(canonical, sort_keys=True, ensure_ascii=False,
                                         separators=(',', ':')).encode()).hexdigest()
 
     @staticmethod
@@ -118,7 +136,7 @@ class ScriptStore:
                 raise HTTPException(409, '这个请求编号已用于另一份讲稿，请使用新的编号。')
             return self.decode(row)
 
-    def create(self, identifier, request, source_names):
+    def create(self, identifier, request, source_names, resolved_context=None):
         with self.connection() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row = conn.execute('SELECT * FROM scripts WHERE id=?', (identifier,)).fetchone()
@@ -129,9 +147,10 @@ class ScriptStore:
                 return self.decode(row)
             self.capacity(conn)
             stamp = timestamp()
-            conn.execute('''INSERT INTO scripts(id,fingerprint,request_json,source_names,status,created_at,updated_at)
-                            VALUES(?,?,?,?,'queued',?,?)''', (identifier, signature,
-                json.dumps(request, ensure_ascii=False), json.dumps(source_names, ensure_ascii=False), stamp, stamp))
+            conn.execute('''INSERT INTO scripts(id,fingerprint,request_json,source_names,resolved_context,status,created_at,updated_at)
+                            VALUES(?,?,?,?,?,'queued',?,?)''', (identifier, signature,
+                json.dumps(request, ensure_ascii=False), json.dumps(source_names, ensure_ascii=False),
+                json.dumps(resolved_context or {}, ensure_ascii=False), stamp, stamp))
             return self.decode(conn.execute('SELECT * FROM scripts WHERE id=?', (identifier,)).fetchone())
 
     def claim(self):
@@ -171,8 +190,10 @@ class ScriptStore:
 
 
 class ScriptWorker(IdeaWorker):
-    def __init__(self, store, provider=None):
+    def __init__(self, store, provider=None, *, reference_validator=None, source_allowed=None, rewrite_resolver=None):
         super().__init__(store, provider or script_model)
+        self.reference_validator, self.source_allowed = reference_validator, source_allowed
+        self.rewrite_resolver = rewrite_resolver
 
     def process(self, request):
         try:
@@ -182,8 +203,21 @@ class ScriptWorker(IdeaWorker):
             if not self.supported():
                 self.store.complete(request['id'], code='not_configured')
                 return
+            context = request.get('resolved_context') or {}
+            references = context.get('reference_works') or []
+            try:
+                if self.source_allowed and any(self.source_allowed(source) is not True for source in context.get('validated_sources', request.get('sources', []))):
+                    raise script_model.ScriptModelError('reference_unavailable')
+                if references and self.reference_validator and self.reference_validator(references) is not True:
+                    raise script_model.ScriptModelError('reference_unavailable')
+                if request.get('rewrite_source_id'):
+                    if self.rewrite_resolver is None or self.rewrite_resolver(request['rewrite_source_id']) != context.get('original_script'):
+                        raise script_model.ScriptModelError('reference_unavailable')
+            except HTTPException:
+                raise script_model.ScriptModelError('reference_unavailable') from None
             values = script_model._request(request['brief'], request['source_names'], mode=request['mode'],
-                brand=request['brand'], subtype=request['subtype'], target_duration=request['target_duration'])
+                brand=request['brand'], subtype=request['subtype'], target_duration=request['target_duration'],
+                reference_works=references, original_script=context.get('original_script'))
             raw = self.provider.generate_script(**values, stop_event=self.stop_event)
             result = script_model.validate_result(raw, values)
             self.store.complete(request['id'], code='cancelled' if self.stop_event.is_set() else None,
@@ -195,25 +229,30 @@ class ScriptWorker(IdeaWorker):
             self.store.complete(request['id'], code=code)
 
 
-def register_script_routes(app, authorize, inbox, data, *, source_validator, name_formatter, provider=None):
-    worker = ScriptWorker(ScriptStore(Path(data) / 'scripts.sqlite3'), provider)
+def register_script_routes(app, authorize, inbox, data, *, source_validator, name_formatter, provider=None,
+                           reference_resolver=None, rewrite_resolver=None, source_allowed=None, reference_validator=None):
+    worker = ScriptWorker(ScriptStore(Path(data) / 'scripts.sqlite3'), provider,
+                          reference_validator=reference_validator, source_allowed=source_allowed, rewrite_resolver=rewrite_resolver)
 
     def require_ready():
         if not worker.supported():
             raise HTTPException(503, script_model.ERRORS['not_configured'])
 
     def response(record):
-        return JSONResponse({'script': record}, status_code=202 if record['status'] in {'queued', 'running'} else 200)
+        return JSONResponse({'script': public_record(record)}, status_code=202 if record['status'] in {'queued', 'running'} else 200)
+
+    def public_record(record):
+        return {key: value for key, value in record.items() if key != 'resolved_context'}
 
     @app.post('/api/scripts', dependencies=[Depends(authorize)])
     def create_script(body: NewScript):
         identifier = str(body.request_id)
-        request = body.model_dump(exclude={'request_id'})
+        request = body.model_dump(mode='json', exclude={'request_id'})
         previous = worker.store.same_request(identifier, request)
         if previous:
             return response(previous)
         require_ready()
-        names, seen = [], set()
+        names, normalized_sources, seen = [], [], set()
         for relative in body.sources:
             try:
                 path = source_validator(inbox, relative)
@@ -223,8 +262,32 @@ def register_script_routes(app, authorize, inbox, data, *, source_validator, nam
             if identity in seen:
                 raise HTTPException(400, '同一素材不能重复选择。')
             seen.add(identity)
-            names.append(name_formatter(path.relative_to(inbox).as_posix()))
-        record = worker.store.create(identifier, request, names)
+            normalized = path.relative_to(inbox).as_posix()
+            if source_allowed and source_allowed(normalized) is not True:
+                raise HTTPException(400, '所选素材不能用于正式讲稿，请移除技术测试或不可用素材。')
+            names.append(name_formatter(normalized))
+            normalized_sources.append(normalized)
+        context = {'validated_sources': normalized_sources} if normalized_sources else {}
+        if body.reference_ids:
+            if reference_resolver is None:
+                raise HTTPException(503, '参考作品服务尚未接通。')
+            refs = reference_resolver([str(value) for value in body.reference_ids])
+            if not isinstance(refs, list) or len(refs) != len(body.reference_ids):
+                raise HTTPException(400, '参考作品记录不完整，请重新选择。')
+            context['reference_works'] = refs
+        if body.rewrite_source_id is not None:
+            if rewrite_resolver is None:
+                raise HTTPException(503, '原讲稿读取服务尚未接通。')
+            context['original_script'] = rewrite_resolver(str(body.rewrite_source_id))
+            if not isinstance(context['original_script'], str) or not context['original_script'].strip():
+                raise HTTPException(400, '所选作品没有可改写的原讲稿。')
+        try:
+            script_model._request(body.brief, names, mode=body.mode, brand=body.brand.model_dump(),
+                subtype=body.subtype, target_duration=body.target_duration,
+                reference_works=context.get('reference_works'), original_script=context.get('original_script'))
+        except script_model.ScriptModelError as exc:
+            raise HTTPException(400, str(exc)) from None
+        record = worker.store.create(identifier, request, names, context)
         worker.wake_event.set()
         return response(record)
 
@@ -233,7 +296,7 @@ def register_script_routes(app, authorize, inbox, data, *, source_validator, nam
         record = worker.store.get(str(script_id))
         if record is None:
             raise HTTPException(404, '讲稿记录不存在。')
-        return {'script': record}
+        return {'script': public_record(record)}
 
     @app.post('/api/scripts/{script_id}/retry', dependencies=[Depends(authorize)])
     def retry_script(script_id: UUID):

@@ -1,21 +1,23 @@
 'use strict';
 const PRODUCTION_DRAFT='cutflow.production.draft.v1';
-const production={mode:'brand_promo',kind:'public',portraitId:null,catalog:[],catalogAt:0,catalogLoading:false,images:new Map(),uploading:false,portraitUpload:null,preferredVoice:null,voiceExplicit:false,scriptId:null,scriptBody:null,scriptJob:null,checking:false,uncertain:false,pollTimer:null,scriptContext:null};
-const productionFields=['productionSubtype','productionScript','productionVoice','productionStyle','productionAspect','productionDuration','productionMusic','productionSubtitles','productionLoop','productionSourceAudio','productionBrand','productionDate','productionPlace','productionCTA'];
+const production={mode:'brand_promo',kind:'public',portraitId:null,catalog:[],catalogAt:0,catalogLoading:false,images:new Map(),uploading:false,portraitUpload:null,preferredVoice:null,voiceExplicit:false,scriptId:null,scriptBody:null,scriptJob:null,checking:false,uncertain:false,pollTimer:null,scriptContext:null,parentId:null,parentTitle:null,revisionKind:null,referenceIds:[]};
+const productionFields=['productionSubtype','productionScript','productionVoice','productionStyle','productionAspect','productionDuration','productionMusic','productionSubtitles','productionLoop','productionSourceAudio','productionBrand','productionDate','productionPlace','productionCTA','productionOpeningTitle'];
 const productionChecks=new Set(['productionMusic','productionSubtitles','productionLoop']);
 function productionMode(){return production.mode;}
 function selectedPresenterReady(){return production.catalog.some(p=>p.id===production.portraitId&&p.kind===production.kind&&p.ready===true)&&(production.kind==='public'||$('#presenterConsent').checked);}
 function scriptRequestUncertain(error){return error.uncertain===true||error.connectivity===true||error.stale===true||!Number.isInteger(error.httpStatus)||error.httpStatus>=500;}
 function productionBrand(){return {name:$('#productionBrand').value.trim(),cta:$('#productionCTA').value.trim(),event_date:$('#productionDate').value.trim(),event_place:$('#productionPlace').value.trim()};}
-function productionContext(){return JSON.stringify({mode:production.mode,subtype:$('#productionSubtype').value,brief:$('#creatorBrief').value,brand:productionBrand(),sources:creator.selected,duration:$('#productionDuration').value});}
-function productionOptions(){return {aspect:$('#productionAspect').value,target_duration:Number($('#productionDuration').value),music:$('#productionMusic').checked,subtitles:$('#productionSubtitles').checked,voice_style:$('#productionStyle').value,source_audio:$('#productionSourceAudio').value};}
+function productionContext(){return JSON.stringify({mode:production.mode,subtype:$('#productionSubtype').value,brief:$('#creatorBrief').value,brand:productionBrand(),sources:creator.selected,duration:$('#productionDuration').value,parentId:production.parentId,referenceIds:production.referenceIds});}
+function productionOptions(){return {...($('#productionOpeningTitle').value.trim()?{opening_title:$('#productionOpeningTitle').value.trim()}:{}),aspect:$('#productionAspect').value,target_duration:Number($('#productionDuration').value),music:$('#productionMusic').checked,subtitles:$('#productionSubtitles').checked,voice_style:$('#productionStyle').value,source_audio:$('#productionSourceAudio').value};}
 function saveProductionDraft(){
   if(!localPage||typeof localStorage==='undefined')return;
-  try{localStorage.setItem(PRODUCTION_DRAFT,JSON.stringify({mode:production.mode,kind:production.kind,portraitId:production.portraitId,voiceExplicit:production.voiceExplicit,fields:Object.fromEntries(productionFields.map(id=>[id,productionChecks.has(id)?$('#'+id).checked:$('#'+id).value])),scriptId:production.scriptId,scriptBody:production.scriptBody,scriptJob:production.scriptJob,uncertain:production.uncertain,scriptContext:production.scriptContext}));}catch{}
+  try{localStorage.setItem(PRODUCTION_DRAFT,JSON.stringify({mode:production.mode,kind:production.kind,portraitId:production.portraitId,voiceExplicit:production.voiceExplicit,fields:Object.fromEntries(productionFields.map(id=>[id,productionChecks.has(id)?$('#'+id).checked:$('#'+id).value])),scriptId:production.scriptId,scriptBody:production.scriptBody,scriptJob:production.scriptJob,uncertain:production.uncertain,scriptContext:production.scriptContext,parentId:production.parentId,parentTitle:production.parentTitle,revisionKind:production.revisionKind,referenceIds:production.referenceIds}));}catch{}
 }
 function loadProductionDraft(){
   if(!localPage||typeof localStorage==='undefined')return;
   try{const d=JSON.parse(localStorage.getItem(PRODUCTION_DRAFT)||'null');if(d){
+    if(typeof d.parentId==='string'&&/^[a-f0-9]{32}$/.test(d.parentId)&&['rewrite','presenter','remix'].includes(d.revisionKind)){production.parentId=d.parentId;production.parentTitle=String(d.parentTitle||'已有作品').slice(0,160);production.revisionKind=d.revisionKind;}
+    production.referenceIds=Array.isArray(d.referenceIds)?[...new Set(d.referenceIds.filter(id=>typeof id==='string'&&/^[a-f0-9]{32}$/.test(id)))].slice(0,3):[];
     if(['edit','brand_promo','narrated_promo','talking_head'].includes(d.mode))production.mode=d.mode;
     if(['public','personal'].includes(d.kind))production.kind=d.kind;
     if(typeof d.portraitId==='string'&&/^[a-zA-Z0-9_-]{1,100}$/.test(d.portraitId))production.portraitId=d.portraitId;
@@ -83,7 +85,7 @@ async function writeProductionScript(){
   if(['queued','running'].includes(production.scriptJob?.status)&&!production.uncertain)return pollProductionScript();
   const brief=$('#creatorBrief').value.trim();if(!brief){scriptMessage('先写一句你的想法。',true);return;}
   const retry=production.uncertain||production.scriptJob?.status==='failed'&&production.scriptContext===productionContext();
-  if(!retry){production.scriptId=crypto.randomUUID();production.scriptBody={request_id:production.scriptId,mode:production.mode,subtype:$('#productionSubtype').value,brief,sources:production.mode==='talking_head'?[]:creatorSelection().filter(a=>a.ready).map(a=>a.source),brand:productionBrand(),target_duration:Number($('#productionDuration').value)};production.scriptContext=productionContext();production.scriptJob=null;$('#productionScriptPreview').hidden=true;}
+  if(!retry){production.scriptId=crypto.randomUUID();production.scriptBody={request_id:production.scriptId,mode:production.mode,subtype:$('#productionSubtype').value,brief,sources:production.mode==='talking_head'?[]:creatorSelection().filter(a=>a.ready).map(a=>a.source),brand:productionBrand(),target_duration:Number($('#productionDuration').value)};if(production.referenceIds?.length)production.scriptBody.reference_ids=production.referenceIds;if(production.parentId&&production.revisionKind==='rewrite')production.scriptBody.rewrite_source_id=production.parentId;production.scriptContext=productionContext();production.scriptJob=null;$('#productionScriptPreview').hidden=true;}
   const id=production.scriptId;production.checking=true;production.uncertain=true;saveProductionDraft();updateProductionAccess();scriptMessage('正在提交讲稿任务，已填写的独白保持不变…');
   try{
     let job;
@@ -107,6 +109,8 @@ async function generateProduction(){
     if(script.length>(production.mode==='talking_head'?450:1500))return;
     if(!$('#creatorBrief').value.trim()||!$('#productionVoice').value||(production.mode==='talking_head'?!selectedPresenterReady()||production.uploading:!selected.length||selected.some(a=>!a.ready)))return;
     creator.requestId=crypto.randomUUID();creator.requestBody={idempotency_key:creator.requestId,mode:production.mode,subtype:$('#productionSubtype').value,sources:production.mode==='talking_head'?[]:selected.map(a=>a.source),brief:$('#creatorBrief').value.trim(),spoken_script:script,voice_id:$('#productionVoice').value,visual_fill:$('#productionLoop').checked?'loop':'reject',brand:productionBrand(),options:productionOptions()};
+    if(production.scriptJob?.status==='succeeded'&&production.scriptContext===productionContext()&&production.scriptJob.result.title)creator.requestBody.title=production.scriptJob.result.title;else if(production.parentId)creator.requestBody.title=(production.parentTitle||'视频作品').slice(0,145)+' · 新版本';
+    if(production.parentId){creator.requestBody.parent_job_id=production.parentId;creator.requestBody.revision_kind=production.revisionKind;}if(production.referenceIds?.length)creator.requestBody.reference_ids=production.referenceIds;if(production.scriptJob?.status==='succeeded'&&production.scriptContext===productionContext())creator.requestBody.script_id=production.scriptId;
     if(production.mode==='talking_head'){creator.requestBody.presenter={kind:production.kind,portrait_id:production.portraitId,consent_confirmed:production.kind==='public'||$('#presenterConsent').checked};creator.requestBody.visual_fill='reject';creator.requestBody.options.source_audio='mute';}
   }
   creator.busy=true;creator.uncertain=true;saveCreatorDraft();saveProductionDraft();renderCreatorMaterials();creatorFeedback('已保存完整讲稿，正在提交到租用 GPU…');

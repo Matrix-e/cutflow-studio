@@ -51,6 +51,28 @@ function setup({storage=new Map(),localPage=true,voices=true,connected=true}={})
   return h;
 }
 
+test('references and original work are persisted before script request; new reference invalidates adoption',async()=>{
+  const h=setup();h.ready();const parent='b'.repeat(32),reference='c'.repeat(32);
+  Object.assign(h.app.production,{parentId:parent,parentTitle:'原作品',revisionKind:'rewrite',referenceIds:[reference]});
+  await h.app.writeProductionScript();assert.equal(h.calls[0].body.rewrite_source_id,parent);assert.deepEqual(plain(h.calls[0].body.reference_ids),[reference]);
+  await h.resolveScript();assert.equal(h.elements.get('productionAdoptScript').disabled,false);
+  h.app.production.referenceIds=[];h.app.updateProductionAccess();assert.equal(h.elements.get('productionAdoptScript').disabled,true);
+  const saved=JSON.parse(h.storage.get(DRAFT));assert.equal(saved.parentId,parent);assert.equal(saved.revisionKind,'rewrite');
+});
+
+test('new version creates a child with lineage and references without rewriting or retrying its parent',async()=>{
+  const h=setup();h.ready();h.field('productionScript','为汽车租赁同行准备一场交流，欢迎了解这次沙龙。');
+  Object.assign(h.app.production,{parentId:'b'.repeat(32),revisionKind:'rewrite',referenceIds:['c'.repeat(32)]});
+  await h.app.generateProduction();const request=h.calls.find(c=>c.route==='/api/creations');
+  assert.equal(request.body.parent_job_id,'b'.repeat(32));assert.equal(request.body.revision_kind,'rewrite');assert.deepEqual(plain(request.body.reference_ids),['c'.repeat(32)]);
+  assert.ok(!h.calls.some(c=>c.route.includes('/retry')||c.options.method==='PUT'||c.options.method==='PATCH'));
+});
+
+test('restoring a new-version draft retains its lineage and references without any submission',()=>{
+  const h=setup();h.ready();Object.assign(h.app.production,{parentId:'d'.repeat(32),parentTitle:'被保留的原作品',revisionKind:'presenter',referenceIds:['e'.repeat(32)]});h.app.saveProductionDraft();
+  const restored=setup({storage:h.storage});assert.equal(restored.app.production.parentId,'d'.repeat(32));assert.equal(restored.app.production.parentTitle,'被保留的原作品');assert.deepEqual(plain(restored.app.production.referenceIds),['e'.repeat(32)]);assert.equal(restored.calls.length,0);
+});
+
 test('script POST is persisted before network resolves; double click submits once',async()=>{
   const h=setup(),response=pending();h.ready();h.field('productionScript','原有独白。');h.apiImpl=()=>response.promise;
   const first=h.app.writeProductionScript();await h.app.writeProductionScript();

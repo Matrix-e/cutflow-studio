@@ -34,6 +34,8 @@ from .preview import PreviewManager, PreviewError
 from .ideas_service import register_ideas_routes
 from .scripts_service import BrandDetails, register_script_routes
 from .presenters_service import PresenterLibrary, register_presenter_routes
+from .progress import progress_snapshot, STAGE_MESSAGES
+from .knowledge import register_knowledge_routes
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts"}
@@ -127,6 +129,9 @@ class NewCreation(BaseModel):
     subtype: Literal['corporate', 'salon_promo', 'salon_recap'] = 'salon_promo'
     presenter: PresenterChoice | None = None
     script_id: UUID | None = None
+    parent_job_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    revision_kind: Literal['rewrite', 'presenter', 'remix'] | None = None
+    reference_ids: list[UUID] = Field(default_factory=list, max_length=3)
 
     @field_validator('brief', 'idempotency_key')
     @classmethod
@@ -145,6 +150,8 @@ class NewCreation(BaseModel):
 
     @model_validator(mode='after')
     def mode_contract(self):
+        if bool(self.parent_job_id) != bool(self.revision_kind):
+            raise ValueError('新版本需要完整的原作品记录和修改类型')
         added_options = {'subtitles', 'voice_style', 'source_audio'} & self.options.model_fields_set
         if self.mode == 'edit':
             if not self.sources:
@@ -298,6 +305,7 @@ def public_job(job: dict, *, inbox: Path, store: Store) -> dict:
     result["retry_block_reason"] = retry_block_reason(job, inbox, store)
     result["can_retry"] = result["retry_block_reason"] is None
     result["preview_supported"] = True
+    result['progress_detail'] = progress_snapshot(job, store.events(job['id']), store.queue_position(job['id']))
     creation = (job.get('settings') or {}).get('creation')
     if isinstance(creation, dict):
         result['brief'] = creation['brief']
@@ -305,6 +313,9 @@ def public_job(job: dict, *, inbox: Path, store: Store) -> dict:
         result['creation_plan'] = creation_plan_for_ui(job, creation)
         result['creation_warnings'] = result['creation_plan']['warnings']
         result['mode'] = creation.get('mode', 'edit')
+        result['parent_job_id'] = creation.get('parent_job_id')
+        result['revision_kind'] = creation.get('revision_kind')
+        result['reference_works'] = creation.get('reference_works', [])
         if creation.get('version') == 2:
             for key in ('spoken_script', 'voice_id', 'brand', 'subtype', 'visual_fill', 'script_id'):
                 result[key] = creation.get(key)
@@ -362,6 +373,14 @@ class Worker:
                 self.lock_file = None
 
     def process(self, job: dict):
+        def stage(value):
+            current = self.store.get(job['id'])
+            if current is None or current['status'] not in {'analyzing', 'rendering'}:
+                raise StateConflict('制作任务状态已变化')
+            if (current.get('production') or {}).get('stage') == value:
+                return
+            self.store.transition(job['id'], [current['status']], current['status'], STAGE_MESSAGES[value],
+                production={**(current.get('production') or {}), 'stage': value, 'error_code': None})
         try:
             paths = validate_job_sources(job, self.inbox, self.store)
             settings = dict(job["settings"])
@@ -372,11 +391,10 @@ class Worker:
                     raise ValueError('此制作模式尚未接通，不能创建替代成片')
                 media = importlib.import_module('studio.narrated')
                 production = {**(job.get('production') or {}), 'stage': 'preparing_voice', 'error_code': None}
-                self.store.transition(job['id'], ['analyzing'], 'analyzing', '正在按已确认讲稿生成完整旁白',
-                                      production=production)
                 work_dir = self.data / 'production' / job['id']
                 work_dir.mkdir(parents=True, exist_ok=True)
                 if creation['mode'] == 'talking_head':
+                    stage('preparing_voice')
                     voice = importlib.import_module('studio.narration')
                     presenter = importlib.import_module('studio.presenter')
                     attempt = work_dir / uuid4().hex
@@ -384,18 +402,17 @@ class Worker:
                     audio = voice.synthesize(creation['spoken_script'], creation['voice_id'], attempt/'narration.wav',
                         style=creation['options']['voice_style'], stop_event=self.stop_event)
                     portrait = PresenterLibrary(self.data).resolve(creation['portrait_snapshot']['id'])
-                    self.store.transition(job['id'], ['analyzing'], 'analyzing', '正在同步人物嘴型',
-                        production={**production, 'stage':'animating_presenter'})
+                    stage('animating_presenter')
                     animated = presenter.render_presenter(portrait, audio['output_path'], attempt/'presenter.mp4',
                         consent_confirmed=True, stop_event=self.stop_event)
                     plan = media.build_narrated_plan([str(attempt/'presenter.mp4')], creation['spoken_script'],
                         creation['voice_id'], creation['options'], settings, work_dir=attempt,
-                        stop_event=self.stop_event, prepared_narration=audio)
+                        stop_event=self.stop_event, prepared_narration=audio, on_stage=stage)
                     plan['presenter'] = animated
                     plan['warnings'].append('本版本使用静态肖像同步嘴型，身体、服装和背景保持所选形象。')
                 else:
                     plan = media.build_narrated_plan([str(path) for path in paths], creation['spoken_script'],
-                        creation['voice_id'], creation['options'], settings, work_dir=work_dir, stop_event=self.stop_event)
+                        creation['voice_id'], creation['options'], settings, work_dir=work_dir, stop_event=self.stop_event, on_stage=stage)
             elif creation is not None:
                 media = importlib.import_module('studio.creative')
                 plan = media.build_creation_plan([str(path) for path in paths], creation['brief'], creation['options'], settings)
@@ -411,9 +428,11 @@ class Worker:
                 fields['production'] = {**production, 'stage': 'compositing',
                     'narration_duration': narration.get('duration', plan.get('duration')),
                     'warnings': plan.get('warnings', [])}
-            self.store.transition(job["id"], ["analyzing"], "rendering", "分析完成，开始渲染和成片检查", plan=plan, progress=35, **fields)
+            if not narrated:
+                fields['production'] = {'stage': 'compositing'}
+            self.store.transition(job["id"], ["analyzing"], "rendering", STAGE_MESSAGES['compositing'], plan=plan, progress=35, **fields)
             output = self.data / "renders" / f"{job['id']}.mp4"
-            report = (media.render_narrated_plan(plan, str(output), settings) if narrated else
+            report = (media.render_narrated_plan(plan, str(output), settings, on_stage=stage) if narrated else
                       media.render_creation_plan(plan, str(output), settings) if creation is not None
                       else media.render_plan(plan, str(output), settings))
             validate_job_sources(job, self.inbox, self.store)
@@ -437,7 +456,7 @@ class Worker:
                     code = getattr(exc, 'code', 'production_failed')
                     if not isinstance(code, str) or not re.fullmatch(r'[a-z_]{1,60}', code):
                         code = 'production_failed'
-                    fields['production'] = {**current['production'], 'stage': 'failed', 'error_code': code}
+                    fields['production'] = {**current['production'], 'last_stage': current['production'].get('stage'), 'stage': 'failed', 'error_code': code}
                 self.store.transition(job["id"], [current["status"]], "failed", "剪辑失败", error=str(exc)[:4000], progress=0, **fields)
 
 
@@ -508,7 +527,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         if "*" in origins:
             raise ValueError("CUTFLOW_ALLOWED_ORIGINS must use exact HTTPS/localhost origins, never *")
         app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False,
-                           allow_methods=["GET", "POST", "PATCH"], allow_headers=["Authorization", "Content-Type", "Idempotency-Key"])
+                           allow_methods=["GET", "POST", "PATCH", "PUT"], allow_headers=["Authorization", "Content-Type", "Idempotency-Key"])
 
     @app.middleware("http")
     async def response_headers(request: Request, call_next):
@@ -533,8 +552,37 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     ideas_worker = register_ideas_routes(app, authorize, inbox_path, data, source_validator=safe_source,
                                         name_formatter=display_name, provider=idea_provider)
     app.state.ideas = ideas_worker
+    knowledge = register_knowledge_routes(app, authorize, data, store)
+    app.state.knowledge = knowledge
+
+    def references(ids):
+        return knowledge.reference_snapshot([UUID(str(identifier)).hex for identifier in ids])
+
+    def completed_work(identifier):
+        job = store.get(UUID(str(identifier)).hex)
+        if not job or job.get('job_kind') != 'production':
+            raise HTTPException(404, '正式作品不存在')
+        if job['status'] not in {'review', 'approved', 'published'} or (job.get('result') or {}).get('qc', {}).get('passed') is not True:
+            raise HTTPException(409, '请先完成原作品，再生成新版本')
+        get_output(job)
+        return job
+
+    def rewrite_source(identifier):
+        job = completed_work(identifier)
+        try:
+            validate_job_sources(job, inbox_path, store)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(409, '原作品使用的素材或人物已变化，请重新选择后制作') from exc
+        script = (job.get('settings') or {}).get('creation', {}).get('spoken_script', '')
+        if not script:
+            raise HTTPException(409, '此作品没有可修改的独白讲稿，请从开始制作填写新讲稿')
+        return script
+
     scripts_worker = register_script_routes(app, authorize, inbox_path, data, source_validator=safe_source,
-                                           name_formatter=display_name, provider=script_provider)
+                                           name_formatter=display_name, provider=script_provider,
+                                           reference_resolver=references, rewrite_resolver=rewrite_source,
+                                           reference_validator=knowledge.validate_references,
+                                           source_allowed=lambda relative: relative not in store.technical_test_sources())
     app.state.scripts = scripts_worker
     portraits = register_presenter_routes(app, authorize, data)
     app.state.portraits = portraits
@@ -569,6 +617,8 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                 "review_required": not automatic, "auto_publish": automatic, "supported_extensions": sorted(MEDIA_EXTENSIONS),
                 "preview_supported": True, "creation_supported": True,
                 "idea_refinement_supported": ideas_worker.supported(),
+                "knowledge_supported": True,
+                "face_swap": {"ready": False, "reason": "原视频换脸尚未开通：还需确认换脸与人脸识别模型的商用授权，并完成本机视频验收。现有口播可使用换人物功能。"},
                 "production": production_capabilities(scripts_worker.supported())}
 
     @app.get("/api/status", dependencies=[Depends(authorize)])
@@ -699,6 +749,24 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         title = body.title.strip() or body.brief[:30]
         specification = {'version': 2 if narrated else 1, 'sources': snapshots, 'brief': body.brief,
                          'options': options, 'interpretation': interpretation}
+        if body.parent_job_id:
+            parent = completed_work(body.parent_job_id)
+            if body.revision_kind == 'presenter' and (body.mode != 'talking_head' or (parent.get('settings') or {}).get('creation', {}).get('mode') != 'talking_head'):
+                raise HTTPException(409, '换人物只适用于已生成的人物口播')
+            specification.update(parent_job_id=parent['id'], revision_kind=body.revision_kind)
+        if body.reference_ids:
+            specification['reference_works'] = references(body.reference_ids)
+        if body.script_id:
+            prepared = scripts_worker.store.get(str(body.script_id))
+            if not prepared or prepared.get('status') != 'succeeded':
+                raise HTTPException(409, '引用的讲稿尚未生成完成')
+            specification['script_modified'] = (prepared.get('result') or {}).get('spoken_script') != body.spoken_script
+            frozen = (prepared.get('resolved_context') or {}).get('reference_works') or []
+            if {entry['id'] for entry in frozen} == {UUID(str(identifier)).hex for identifier in body.reference_ids}:
+                knowledge.validate_references(frozen)
+                specification['reference_works'] = frozen
+            elif frozen or body.reference_ids:
+                raise HTTPException(409, '讲稿所用参考与本次选择不同，请按当前参考重新生成讲稿')
         production = None
         if narrated:
             specification.update(mode=body.mode, spoken_script=body.spoken_script, voice_id=body.voice_id,
@@ -711,14 +779,15 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
             production = {'mode': body.mode, 'stage': 'queued', 'duration_policy': 'complete_narration',
                           'warnings': interpretation['warnings'], 'error_code': None}
         else:
-            signature_value = ['creation-v1', snapshots, body.brief, options, title, settings]
+            signature_value = ['creation-v1', specification, title, settings]
         signature = json.dumps(signature_value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
         settings['creation'] = specification
         first = snapshots[0] if snapshots else {'source':'portrait:'+portrait_snapshot['id'], 'size':0, 'mtime_ns':0}
         job, created = store.create(source=first['source'], title=title,
                                     settings=settings, fingerprint=hashlib.sha256(signature.encode()).hexdigest(),
                                     source_size=first['size'], source_mtime_ns=first['mtime_ns'],
-                                    idempotency_key=body.idempotency_key, production=production)
+                                    idempotency_key=body.idempotency_key, production=production,
+                                    allow_active_merge=not bool(body.parent_job_id))
         worker.wake_event.set()
         return JSONResponse(status_code=201 if created else 200,
                             content={'job': public_job(job, inbox=inbox_path, store=store), 'created': created,
@@ -776,6 +845,20 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                                 content_disposition_type="inline")
         return FileResponse(output, media_type="video/mp4", filename=video_download_name(job["title"]),
                             content_disposition_type="inline")
+
+    @app.get('/api/jobs/{job_id}/draft', dependencies=[Depends(authorize)])
+    def work_draft(job_id: UUID):
+        job = completed_work(job_id)
+        creation = (job.get('settings') or {}).get('creation') or {}
+        if not creation:
+            raise HTTPException(409, '此旧版作品没有完整制作草稿，请从素材库重新制作')
+        defaults = {'mode': 'edit', 'brief': '', 'options': {}, 'spoken_script': '',
+                    'voice_id': '', 'visual_fill': 'reject', 'brand': {}, 'subtype': 'salon_promo', 'presenter': None}
+        draft = {key: creation.get(key, default) for key, default in defaults.items()}
+        draft['options'] = {key: value for key, value in draft['options'].items() if key in CreationOptions.model_fields}
+        return {'draft': draft,
+                'sources': [entry['source'] for entry in creation.get('sources', [])],
+                'parent_job_id': job['id'], 'title': job['title']}
 
     @app.get("/api/jobs/{job_id}/preview", dependencies=[Depends(authorize)])
     def preview_status(job_id: str):
