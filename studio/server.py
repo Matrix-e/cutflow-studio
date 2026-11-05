@@ -26,7 +26,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
 
 from . import __version__
 from .store import DiagnosticSourceConflict, StateConflict, Store
@@ -38,6 +38,8 @@ from .scripts_service import BrandDetails, register_script_routes
 from .presenters_service import PresenterLibrary, register_presenter_routes
 from .progress import progress_snapshot, STAGE_MESSAGES
 from .knowledge import register_knowledge_routes
+from .asset_insights import AssetInsights
+from .assembly_service import AssemblyService, PIPELINE_LOCK, normalized_options, script_hash
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts"}
@@ -87,6 +89,16 @@ class NewJob(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class BrandContextForm(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    revision: StrictInt = Field(ge=0)
+    facts: str = Field(default='', max_length=5000)
+    advantages: str = Field(default='', max_length=5000)
+    miniapp: str = Field(default='', max_length=5000)
+    creative_rules: str = Field(default='', max_length=5000)
+    culture: str = Field(default='', max_length=5000)
+
+
 class ResolveAssets(BaseModel):
     model_config = ConfigDict(extra='forbid')
     sources: list[Annotated[str, Field(strict=True, min_length=1, max_length=4096)]] = Field(min_length=1, max_length=12)
@@ -112,6 +124,8 @@ class CreationOptions(BaseModel):
     subtitles: StrictBool = True
     voice_style: Literal['professional', 'warm', 'energetic'] = 'professional'
     source_audio: Literal['mute', 'low'] = 'mute'
+    allow_supplemental_visuals: StrictBool = False
+    allow_generated_dialogue: StrictBool = False
 
     @field_validator('target_duration', mode='before')
     @classmethod
@@ -137,7 +151,7 @@ class NewCreation(BaseModel):
     title: str = Field(default='', max_length=160)
     options: CreationOptions = Field(default_factory=CreationOptions)
     idempotency_key: str = Field(min_length=1, max_length=200)
-    mode: Literal['edit', 'talking_head', 'narrated_promo', 'brand_promo'] = 'edit'
+    mode: Literal['edit', 'vlog', 'story', 'talking_head', 'narrated_promo', 'brand_promo'] = 'edit'
     spoken_script: str = Field(default='', max_length=1500)
     voice_id: str = Field(default='', max_length=120)
     visual_fill: Literal['reject', 'loop'] = 'reject'
@@ -145,6 +159,8 @@ class NewCreation(BaseModel):
     subtype: Literal['corporate', 'salon_promo', 'salon_recap'] = 'salon_promo'
     presenter: PresenterChoice | None = None
     script_id: UUID | None = None
+    assembly_plan_id: UUID | None = None
+    expected_script_sha256: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
     parent_job_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     revision_kind: Literal['rewrite', 'presenter', 'remix'] | None = None
     reference_ids: list[UUID] = Field(default_factory=list, max_length=3)
@@ -168,14 +184,25 @@ class NewCreation(BaseModel):
     def mode_contract(self):
         if bool(self.parent_job_id) != bool(self.revision_kind):
             raise ValueError('新版本需要完整的原作品记录和修改类型')
-        added_options = {'subtitles', 'voice_style', 'source_audio'} & self.options.model_fields_set
-        if self.mode == 'edit':
+        added_options = {'voice_style', 'source_audio'} & self.options.model_fields_set
+        if self.mode in {'edit', 'vlog', 'story'}:
             if not self.sources:
                 raise ValueError('请选择 1–12 段视频素材')
-            if (self.spoken_script or self.voice_id or self.presenter or self.script_id or added_options
+            if self.mode == 'edit' and (self.spoken_script or self.voice_id or self.presenter or self.script_id or added_options
                     or any(self.brand.model_dump().values()) or self.visual_fill != 'reject'):
                 raise ValueError('配音与品牌设置需要选择对应的宣传制作模式')
-        elif self.mode in {'narrated_promo', 'brand_promo'}:
+            if self.mode == 'vlog' and (self.spoken_script or self.voice_id or self.presenter or self.script_id
+                    or any(self.brand.model_dump().values()) or self.visual_fill != 'reject'):
+                raise ValueError('原声 Vlog 使用素材中的真实声音，不需要另填讲稿或配音')
+            if self.mode == 'story' and (self.voice_id or self.presenter or any(self.brand.model_dump().values()) or self.visual_fill != 'reject'):
+                raise ValueError('自动精剪使用独立旁白与所选素材，不使用人物口型设置')
+        if self.assembly_plan_id and (self.mode!='story' or not self.spoken_script or not self.expected_script_sha256):
+            raise ValueError('精剪方案需要完整脚本和对应的脚本版本')
+        if self.mode!='story' and (self.assembly_plan_id or self.expected_script_sha256):
+            raise ValueError('此模式不使用自动选材方案')
+        if self.mode=='story' and self.script_id and not self.spoken_script:
+            raise ValueError('使用已生成脚本时，请保留完整脚本文字')
+        if self.mode in {'narrated_promo', 'brand_promo'}:
             if not self.spoken_script or not self.voice_id:
                 raise ValueError('请先准备并确认讲稿、选择音色，再生成视频')
             if self.presenter:
@@ -196,6 +223,36 @@ class NewCreation(BaseModel):
         return self
 
 
+class NewAssembly(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    request_id: UUID
+    title: str = Field(default='',max_length=160)
+    spoken_script: str = Field(min_length=1,max_length=1500)
+    script_id: UUID | None = None
+    brief: str = Field(default='根据已保存的企业文化与品牌知识制作有内容的视频',min_length=1,max_length=3000)
+    sources: list[Annotated[str,Field(min_length=1,max_length=4096)]] = Field(default_factory=list,max_length=12)
+    options: CreationOptions = Field(default_factory=CreationOptions)
+    auto_render: StrictBool = False
+    parent_job_id: str | None = Field(default=None,pattern=r'^[a-f0-9]{32}$')
+    revision_kind: Literal['rewrite','remix'] | None = None
+    reference_ids: list[UUID] = Field(default_factory=list,max_length=3)
+
+    @field_validator('spoken_script','brief')
+    @classmethod
+    def text(cls,value):
+        value=value.strip()
+        if not value or any(ord(char)<32 and char not in '\r\n\t' for char in value):
+            raise ValueError('请填写有效的脚本和想法')
+        return value
+
+    @model_validator(mode='after')
+    def lineage(self):
+        if bool(self.parent_job_id)!=bool(self.revision_kind):raise ValueError('新版本的原作品信息不完整')
+        unsupported=self.options.model_fields_set-{'aspect','music','subtitles','target_duration','opening_title'}
+        if unsupported:raise ValueError('自动精剪只接受画幅、配乐、字幕、时长与片头设置')
+        return self
+
+
 def production_capabilities(script_supported=False):
     reason = '本地配音模型尚未就绪。'
     state, voices = {}, []
@@ -212,7 +269,12 @@ def production_capabilities(script_supported=False):
     except (ImportError, OSError, ValueError, AttributeError, TypeError):
         ready = False
     person = importlib.import_module('studio.presenter').configuration_status()
-    return {'modes': {'edit': {'ready': True, 'reason': None},
+    supplement_caps = importlib.import_module('studio.supplements').configuration_status()
+    story_model = importlib.import_module('studio.idea_model').configuration_status()
+    story_ready = ready and story_model['configured']
+    return {'supplements': supplement_caps, 'modes': {'edit': {'ready': True, 'reason': None},
+                     'vlog': {'ready': True, 'reason': None},
+                     'story': {'ready': story_ready, 'reason': None if story_ready else reason or story_model.get('reason')},
                      'narrated_promo': {'ready': ready, 'reason': reason},
                      'brand_promo': {'ready': ready, 'reason': reason},
                      'talking_head': {'ready': ready and person.get('configured') is True,
@@ -357,7 +419,7 @@ def job_source_snapshots(job: dict) -> list[dict]:
             if creation.get('sources') != [] or not isinstance(creation.get('portrait_snapshot'), dict):
                 raise ValueError('人物形象记录不完整，请重新创建任务')
             return []
-        if (not isinstance(creation, dict) or creation.get('version') not in {1, 2}
+        if (not isinstance(creation, dict) or creation.get('version') not in {1, 2, 3}
                 or not isinstance(creation.get('sources'), list) or not 1 <= len(creation['sources']) <= 12):
             raise ValueError('创作任务的素材记录不完整，请重新创建任务')
         return creation['sources']
@@ -399,10 +461,17 @@ def creation_plan_for_ui(job: dict, creation: dict) -> dict:
     interpretation = creation.get('interpretation') or {}
     warnings = list(dict.fromkeys([*interpretation.get('warnings', []), *plan.get('warnings', []),
                                    *(job.get('result') or {}).get('warnings', [])]))
-    result = {'resolved': plan.get('resolved', interpretation.get('resolved', {})),
+    result = {'resolved': {**interpretation.get('resolved', {}), **plan.get('resolved', {}),
+                          **({'subtitles': creation['options']['subtitles']} if 'subtitles' in creation.get('options',{}) else {})},
               'summary': plan.get('summary', interpretation.get('summary', '')),
               'warnings': warnings, 'source_count': len(creation['sources']),
               'stage': 'planned' if job.get('plan') else 'interpreted'}
+    if plan.get('storyboard'):
+        result['storyboard']=plan['storyboard']
+        result['spoken_script']=plan.get('spoken_script','')
+        result['summary']=[plan['storyboard']['title'],plan['storyboard']['angle'],*['段落：'+item['narration'] for item in plan['storyboard']['scenes']]]
+    if plan.get('supplement'):
+        result['summary'] = [*result.get('summary', []), '片尾补充台词：'+plan['supplement'].get('spoken_script','（无旁白）')]
     if 'duration' in plan:
         result['duration'] = plan['duration']
     return result
@@ -448,6 +517,10 @@ def public_job(job: dict, *, inbox: Path, store: Store) -> dict:
         if creation.get('version') == 2:
             for key in ('spoken_script', 'voice_id', 'brand', 'subtype', 'visual_fill', 'script_id'):
                 result[key] = creation.get(key)
+        elif creation.get('mode') == 'story':
+            result['spoken_script'] = creation.get('spoken_script','') or (job.get('plan') or {}).get('spoken_script', '')
+            result['script_id']=creation.get('script_id')
+            result['assembly_plan_id']=creation.get('assembly_plan_id')
     return result
 
 
@@ -495,7 +568,8 @@ class Worker:
                     self.wake_event.wait(timeout=1)
                     self.wake_event.clear()
                     continue
-                self.process(job)
+                with PIPELINE_LOCK:
+                    self.process(job)
         finally:
             if self.lock_file:
                 self.lock_file.close()
@@ -514,8 +588,34 @@ class Worker:
             paths = validate_job_sources(job, self.inbox, self.store)
             settings = dict(job["settings"])
             creation = settings.pop('creation', None)
-            narrated = creation is not None and creation.get('version') == 2
-            if narrated:
+            story = creation is not None and creation.get('version') == 3 and creation.get('mode') == 'story'
+            narrated = creation is not None and (creation.get('version') == 2 or story)
+            vlog = creation is not None and creation.get('version') == 3 and creation.get('mode') == 'vlog'
+            if story:
+                media = importlib.import_module('studio.narrated')
+                story_engine = importlib.import_module('studio.story')
+                production = {**(job.get('production') or {}), 'stage': 'planning_story', 'error_code': None}
+                stage('validating')
+                work_dir = self.data / 'production' / job['id']
+                if creation.get('assembly_plan_id'):
+                    record,plan=self.assemblies.load_plan(creation['assembly_plan_id'])
+                    if plan['assembly']['script_sha256']!=creation.get('script_sha256'):
+                        raise ValueError('精剪方案与最终脚本不一致，未继续制作')
+                elif creation.get('spoken_script'):
+                    from .auto_assembly import build_auto_assembly
+                    plan=build_auto_assembly(paths,creation['spoken_script'],creation['options'],settings,
+                        work_dir=work_dir,data=self.data,stop_event=self.stop_event,on_stage=stage)
+                else:
+                    plan = story_engine.build_story_plan([str(path) for path in paths], creation['brief'], creation['options'], settings,
+                        work_dir=work_dir, data=self.data, stop_event=self.stop_event, on_stage=stage)
+            elif vlog:
+                media = importlib.import_module('studio.vlog')
+                stage('validating')
+                work_dir = self.data / 'production' / job['id']
+                work_dir.mkdir(parents=True, exist_ok=True)
+                plan = media.build_vlog_plan([str(path) for path in paths], creation['brief'], creation['options'], settings,
+                                             work_dir=work_dir, stop_event=self.stop_event, on_stage=stage)
+            elif narrated:
                 if creation.get('mode') not in {'narrated_promo', 'brand_promo', 'talking_head'}:
                     raise ValueError('此制作模式尚未接通，不能创建替代成片')
                 media = importlib.import_module('studio.narrated')
@@ -544,7 +644,7 @@ class Worker:
                         creation['voice_id'], creation['options'], settings, work_dir=work_dir, stop_event=self.stop_event, on_stage=stage)
             elif creation is not None:
                 media = importlib.import_module('studio.creative')
-                plan = media.build_creation_plan([str(path) for path in paths], creation['brief'], creation['options'], settings)
+                plan = media.build_creation_plan([str(path) for path in paths], creation['brief'], {k:v for k,v in creation['options'].items() if k!='subtitles'}, settings)
             else:
                 media = importlib.import_module("studio.media")
                 if settings.get("srt_path"):
@@ -557,16 +657,32 @@ class Worker:
                 fields['production'] = {**production, 'stage': 'compositing',
                     'narration_duration': narration.get('duration', plan.get('duration')),
                     'warnings': plan.get('warnings', [])}
-            if not narrated:
+            if not narrated and not vlog:
                 fields['production'] = {'stage': 'compositing'}
+            elif vlog:
+                fields['production'] = {**(job.get('production') or {}), 'stage': 'compositing',
+                                        'warnings': plan.get('warnings', [])}
             self.store.transition(job["id"], ["analyzing"], "rendering", STAGE_MESSAGES['compositing'], plan=plan, progress=35, **fields)
             output = self.data / "renders" / f"{job['id']}.mp4"
-            report = (media.render_narrated_plan(plan, str(output), settings, on_stage=stage) if narrated else
+            needs_captions = bool(creation and not narrated and creation.get('options',{}).get('subtitles'))
+            render_stage = lambda value: None if needs_captions and value == 'checking' else stage(value)
+            report = (media.render_vlog_plan(plan, str(output), settings, on_stage=render_stage) if vlog else
+                      media.render_narrated_plan(plan, str(output), settings, on_stage=stage) if narrated else
                       media.render_creation_plan(plan, str(output), settings) if creation is not None
                       else media.render_plan(plan, str(output), settings))
+            if needs_captions:
+                stage('captioning')
+                caption_engine=importlib.import_module('studio.captions')
+                captions = caption_engine.add_captions(output,self.data/'production'/job['id']/'captions',settings,self.stop_event)
+                captions['warnings'] = [*report.get('warnings',[]), *captions.get('warnings',[])]
+                original_qc = report.get('qc',{})
+                captions['qc']['passed'] = captions['qc']['passed'] and original_qc.get('passed') is True
+                captions['qc']['checks'] = [*original_qc.get('checks',[]), *captions['qc']['checks']]
+                report.update(captions)
+                stage('checking')
             validate_job_sources(job, self.inbox, self.store)
             passed = report.get("qc", {}).get("passed") is True
-            if narrated:
+            if narrated or vlog:
                 fields['production'] = {**fields['production'], 'stage': 'ready' if passed else 'failed',
                     'duration': report.get('duration'), 'warnings': report.get('warnings', [])}
             if not passed:
@@ -636,9 +752,13 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
             collection_worker.start()
             ideas_worker.start()
             scripts_worker.start()
+            assemblies.start()
+            director.start()
         try:
             yield
         finally:
+            director.stop()
+            assemblies.stop()
             scripts_worker.stop()
             ideas_worker.stop()
             previews.stop()
@@ -683,6 +803,35 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
     app.state.ideas = ideas_worker
     knowledge = register_knowledge_routes(app, authorize, data, store)
     app.state.knowledge = knowledge
+    from . import brand_context, brand_media
+    brand_media.register_brand_media_routes(app, authorize, data)
+    from .director_routes import register_director_routes
+    director = register_director_routes(app, authorize, inbox_path, data,
+        source_validator=safe_source,
+        source_allowed=lambda relative: relative not in store.technical_test_sources(),
+        brand_snapshot=lambda goal: brand_context.model_context(data, query=goal),
+        settings_loader=lambda: json.loads(os.getenv('CUTFLOW_SETTINGS','{}')))
+    app.state.director = director
+
+    def brand_form(value):
+        return {'revision': value['revision'], **value['form'],
+                'confirmed_facts': [{key: fact[key] for key in ('id','category','text','source')}
+                                    for fact in value['facts'] if fact['status']=='confirmed'],
+                'screenshots': brand_media.list_screenshots(data)}
+
+    @app.get('/api/brand-context', dependencies=[Depends(authorize)])
+    def get_brand_context():
+        return brand_form(brand_context.load_context(data))
+
+    @app.put('/api/brand-context', dependencies=[Depends(authorize)])
+    def put_brand_context(body: BrandContextForm):
+        try:
+            return brand_form(brand_context.update_from_form(data,
+                body.model_dump(exclude={'revision'},exclude_unset=True), body.revision))
+        except brand_context.BrandContextConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except brand_context.BrandContextError as exc:
+            raise HTTPException(400, str(exc)) from None
 
     def references(ids):
         return knowledge.reference_snapshot([UUID(str(identifier)).hex for identifier in ids])
@@ -704,6 +853,9 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
             raise HTTPException(409, '原作品使用的素材或人物已变化，请重新选择后制作') from exc
         script = (job.get('settings') or {}).get('creation', {}).get('spoken_script', '')
         if not script:
+            script=(job.get('plan') or {}).get('spoken_script','') or '\n'.join(
+                scene.get('narration','') for scene in (job.get('plan') or {}).get('storyboard',{}).get('scenes',[]))
+        if not script:
             raise HTTPException(409, '此作品没有可修改的独白讲稿，请从开始制作填写新讲稿')
         return script
 
@@ -713,6 +865,79 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                                            reference_validator=knowledge.validate_references,
                                            source_allowed=lambda relative: relative not in store.technical_test_sources())
     app.state.scripts = scripts_worker
+
+    def assembly_render(record):
+        previous=store.get_by_request('assembly-render-'+record['id'])
+        if previous:return previous['id']
+        req=record['request'];result=record['result']
+        values={key:req[key] for key in ('title','brief','script_id','parent_job_id','revision_kind','reference_ids') if req.get(key) is not None}
+        response=new_creation(NewCreation(**values,mode='story',sources=result['sources'],
+            spoken_script=req['spoken_script'],expected_script_sha256=result['script_sha256'],
+            assembly_plan_id=UUID(record['id']),options=req['options'],
+            idempotency_key='assembly-render-'+record['id']))
+        return json.loads(response.body)['job']['id']
+
+    assemblies=AssemblyService(data,inbox_path,validate_source=safe_source,
+        source_allowed=lambda relative:relative not in store.technical_test_sources(),enqueue_render=assembly_render)
+    app.state.assemblies=assemblies
+    worker.assemblies=assemblies
+
+    @app.post('/api/assembly-plans',dependencies=[Depends(authorize)])
+    def new_assembly(body:NewAssembly):
+        request=body.model_dump(mode='json',exclude={'request_id'})
+        request['options']=normalized_options(body.options.model_dump(exclude_unset=True))
+        prior=assemblies.same_request(str(body.request_id),request)
+        if prior:
+            prior=assemblies.retry_handoff(prior['id'])
+            return {'assembly':assemblies.public(prior)}
+        if not production_capabilities()['modes']['story']['ready']:
+            raise HTTPException(503,'旁白与自动剪辑服务尚未就绪，请连接 GPU 后再试。')
+        if body.parent_job_id:completed_work(body.parent_job_id)
+        context=brand_context.model_context(data,query=body.brief+'\n'+body.spoken_script)
+        refs=references(body.reference_ids) if body.reference_ids else []
+        if body.script_id:
+            script_record=scripts_worker.store.get(str(body.script_id))
+            if not script_record or script_record['status']!='succeeded':raise HTTPException(409,'脚本尚未生成完成。')
+            frozen=script_record.get('resolved_context') or {}
+            context=frozen.get('brand_context',context)
+            prior_refs=frozen.get('reference_works') or []
+            if {x['id'] for x in prior_refs}!={x['id'] for x in refs}:raise HTTPException(409,'参考作品已经改变，请重新生成脚本。')
+            if prior_refs:knowledge.validate_references(prior_refs)
+        candidates=body.sources
+        scope={'automatic_library':not bool(candidates)}
+        if not candidates:
+            pool=assets()['assets']
+            # Analyse a bounded selection; expose the scope instead of claiming
+            # every file in an unbounded library was viewed by a vision model.
+            terms=brand_context._search_terms(body.brief+' '+body.spoken_script)
+            pool.sort(key=lambda item:(-len(terms & brand_context._search_terms(item['source'])),-item['modified_ns'],item['source']))
+            candidates=[item['source'] for item in pool[:12]]
+            scope.update(library_available=len(pool),analysis_limit=12,scope_limited=len(pool)>12)
+        else:scope.update(library_available=len(candidates),analysis_limit=12,scope_limited=False)
+        if not candidates:raise HTTPException(400,'素材库还没有可用视频，请先上传素材。')
+        snapshots=[];seen=set()
+        for relative in candidates:
+            try:
+                path=safe_source(inbox_path,relative);stat=path.stat();normalized=path.relative_to(inbox_path).as_posix()
+            except (OSError,ValueError):raise HTTPException(400,'素材尚未同步完成或已经移走，请重新选择。') from None
+            if normalized in seen:raise HTTPException(400,'同一素材不能重复选择。')
+            if normalized in store.technical_test_sources():raise HTTPException(400,'技术测试素材不能用于正式成片。')
+            if stat.st_size<=0:raise HTTPException(400,'素材文件为空，请等待上传完成。')
+            seen.add(normalized);snapshots.append({'source':normalized,'size':stat.st_size,'mtime_ns':stat.st_mtime_ns,'ctime_ns':stat.st_ctime_ns})
+        settings={'encoder':'nvenc' if gpu_status['available'] else 'cpu'}
+        try:
+            configured=json.loads(os.getenv('CUTFLOW_SETTINGS','{}'))
+            if isinstance(configured,dict):settings.update({k:v for k,v in configured.items() if k in {'encoder','fps','crf','normalize_audio'}})
+        except ValueError:raise HTTPException(503,'剪辑配置暂时不可用。') from None
+        record=assemblies.create(body.request_id,request,{'sources':snapshots,'settings':settings,'brand_context':context,'reference_works':refs,'scope':scope})
+        return JSONResponse({'assembly':assemblies.public(record)},status_code=202)
+
+    @app.get('/api/assembly-plans/{assembly_id}',dependencies=[Depends(authorize)])
+    def get_assembly(assembly_id:UUID):
+        record=assemblies.get(str(assembly_id))
+        if not record:raise HTTPException(404,'编排任务不存在。')
+        return {'assembly':assemblies.public(record)}
+
     portraits = register_presenter_routes(app, authorize, data)
     app.state.portraits = portraits
 
@@ -745,6 +970,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         return {"inbox": str(inbox_path), "data_dir": str(data), "delivery": delivery_state(),
                 "review_required": not automatic, "auto_publish": automatic, "supported_extensions": sorted(MEDIA_EXTENSIONS),
                 "preview_supported": True, "creation_supported": True,
+                "director_supported": True,
                 "idea_refinement_supported": ideas_worker.supported(),
                 "knowledge_supported": True,
                 "queue_withdrawal_supported": True,
@@ -759,6 +985,26 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                 "ffmpeg_available": shutil.which("ffmpeg") is not None, "ffprobe_available": shutil.which("ffprobe") is not None,
                 "delivery": delivery_state(), "review_required": True, "gpu": gpu_status,
                 "execution_target": os.getenv("CUTFLOW_EXECUTION_TARGET", "local")}
+
+    insights = AssetInsights(data)
+
+    def insight_source(source):
+        try:
+            path = safe_source(inbox_path, source)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if path.relative_to(inbox_path).as_posix() in store.technical_test_sources():
+            raise HTTPException(409, '技术测试素材不参与推荐')
+        return path
+
+    @app.get('/api/assets/insights', dependencies=[Depends(authorize)])
+    def asset_insight_status(source: str = Query(min_length=1, max_length=4096)):
+        return insights.read(insight_source(source))
+
+    @app.post('/api/assets/insights', dependencies=[Depends(authorize)])
+    def asset_insight_start(source: str = Query(min_length=1, max_length=4096), retry: bool = False):
+        path = insight_source(source)
+        return insights.retry(path) if retry else insights.read(path, enqueue=True)
 
     @app.get("/api/assets", dependencies=[Depends(authorize)])
     def assets():
@@ -806,10 +1052,40 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
 
     @app.post('/api/creations', dependencies=[Depends(authorize)])
     def new_creation(body: NewCreation):
+        prepared_assembly=None
+        if body.expected_script_sha256 and script_hash(body.spoken_script)!=body.expected_script_sha256:
+            raise HTTPException(409,'脚本已经修改，请按当前脚本重新编排。')
+        if body.assembly_plan_id:
+            prepared_assembly,_=assemblies.load_plan(str(body.assembly_plan_id))
+            prepared_request=prepared_assembly['request']
+            if (prepared_request['spoken_script']!=body.spoken_script
+                    or [x['source'] for x in prepared_assembly['snapshot']['sources']]!=body.sources
+                    or normalized_options(body.options.model_dump(exclude_unset=True))!=prepared_request['options']
+                    or str(body.script_id or '')!=str(prepared_request.get('script_id') or '')
+                    or body.brief!=prepared_request['brief']
+                    or body.parent_job_id!=prepared_request.get('parent_job_id')
+                    or body.revision_kind!=prepared_request.get('revision_kind')
+                    or [str(x) for x in body.reference_ids]!=prepared_request.get('reference_ids',[])):
+                raise HTTPException(409,'脚本、素材或制作设置已改变，请重新自动编排。')
+            previous=store.get_by_request('assembly-render-'+str(body.assembly_plan_id))
+            if previous:
+                assemblies.update(str(body.assembly_plan_id),job_id=previous['id'],error=None)
+                return JSONResponse({'job':public_job(previous,inbox=inbox_path,store=store),
+                    'created':False,'owned_by_request':True},status_code=200)
         is_person = body.mode == 'talking_head'
         narrated = body.mode in {'narrated_promo', 'brand_promo', 'talking_head'}
+        vlog = body.mode == 'vlog'
+        story = body.mode == 'story'
+        if body.options.allow_supplemental_visuals or body.options.allow_generated_dialogue:
+            caps = importlib.import_module('studio.supplements').configuration_status()
+            if not vlog or (body.options.allow_supplemental_visuals and not caps['visuals']) or (body.options.allow_generated_dialogue and not caps['dialogue']):
+                raise HTTPException(503, '所选补充生成服务尚未就绪，请检查 GPU 模型配置。')
         if narrated and not is_person and not body.sources:
             raise HTTPException(400, '请先上传用于搭配旁白的画面素材；当前不会自动生成或补拍画面。')
+        if story and not production_capabilities()['modes']['story']['ready']:
+            raise HTTPException(503,'知识故事生成服务尚未配置完整')
+        if not narrated and not story and body.options.model_dump(exclude_unset=True).get('subtitles') and not importlib.import_module('studio.captions').configuration_status()['configured']:
+            raise HTTPException(503,'语音字幕服务尚未配置完整')
         capabilities = production_capabilities() if narrated else None
         if narrated:
             if not capabilities['modes'][body.mode]['ready']:
@@ -841,7 +1117,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
             raise DiagnosticSourceConflict('所选素材包含已登记的技术测试，不能用于正式创作')
         requested_options = body.options.model_dump(exclude_unset=True)
         options = {key: value for key, value in requested_options.items()
-                   if key not in {'subtitles', 'voice_style', 'source_audio'}}
+                   if key not in {'subtitles', 'voice_style', 'source_audio', 'allow_supplemental_visuals', 'allow_generated_dialogue'}}
         try:
             creative = importlib.import_module('studio.creative')
         except ImportError as exc:
@@ -854,7 +1130,24 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                 or not isinstance(interpretation.get('warnings', []), list)
                 or any(not isinstance(warning, str) for warning in interpretation.get('warnings', []))):
             raise HTTPException(503, '创作组件未返回完整制作方案，已停止提交')
-        if narrated:
+        if story:
+            options = {key: requested_options[key] for key in ('aspect','music','subtitles','target_duration','opening_title') if key in requested_options}
+            options.setdefault('subtitles',True)
+            options.setdefault('music',True)
+            interpretation={'resolved':options,'summary':['结合原声、品牌知识与优秀作品策划故事','按知识点安排画面与小程序截图','生成完整旁白'], 'warnings':[]}
+            if body.spoken_script:
+                options=normalized_options(requested_options)
+                interpretation={'resolved':options,'summary':['使用当前完整脚本','按素材原声与画面质量选择不重复片段','自动适配画幅、字幕与音乐'], 'warnings':[]}
+        elif vlog:
+            options = {key: requested_options.get(key) for key in ('aspect', 'music', 'opening_title', 'subtitles', 'allow_supplemental_visuals', 'allow_generated_dialogue') if key in requested_options}
+            options['target_duration'] = None
+            options.setdefault('music', True)
+            options['keep_original_audio'] = True
+            interpretation = {'resolved': options,
+                'summary': ['完整保留素材真实声音', '按所选顺序拼接',
+                            '加入轻音乐' if options['music'] else '不添加音乐'],
+                'warnings': ['原声按顺序保留；启用的补充内容会放在片尾，自动语义精剪尚未接通。']}
+        elif narrated:
             resolved = interpretation['resolved']
             source_audio = body.options.source_audio
             if 'source_audio' not in requested_options and 'keep_original_audio' in requested_options:
@@ -875,6 +1168,9 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                 '画面跟随完整语音长度', '原素材声音静音' if source_audio == 'mute' else '低音量保留原素材声音',
                 '生成讲稿字幕' if options['subtitles'] else '不显示字幕',
                 '添加轻音乐' if options['music'] else '不额外添加音乐'], 'warnings': list(dict.fromkeys(warnings))}
+        if body.mode=='edit':
+            options['subtitles']=requested_options.get('subtitles',False)
+            interpretation['resolved'] = {**interpretation.get('resolved',{}), 'subtitles': options['subtitles']}
         settings = {'encoder': 'nvenc' if gpu_status['available'] else 'cpu'}
         try:
             configured = json.loads(os.getenv('CUTFLOW_SETTINGS', '{}'))
@@ -884,7 +1180,7 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         except ValueError:
             raise HTTPException(503, '服务端剪辑参数配置无效，请检查启动配置') from None
         title = body.title.strip() or body.brief[:30]
-        specification = {'version': 2 if narrated else 1, 'sources': snapshots, 'brief': body.brief,
+        specification = {'version': 3 if (vlog or story) else (2 if narrated else 1), 'sources': snapshots, 'brief': body.brief,
                          'options': options, 'interpretation': interpretation}
         if body.parent_job_id:
             parent = completed_work(body.parent_job_id)
@@ -892,12 +1188,18 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
                 raise HTTPException(409, '换人物只适用于已生成的人物口播')
             specification.update(parent_job_id=parent['id'], revision_kind=body.revision_kind)
         if body.reference_ids:
-            specification['reference_works'] = references(body.reference_ids)
+            if prepared_assembly:
+                frozen_refs=prepared_assembly['snapshot'].get('reference_works') or []
+                knowledge.validate_references(frozen_refs)
+                specification['reference_works']=frozen_refs
+            else:specification['reference_works'] = references(body.reference_ids)
         if body.script_id:
             prepared = scripts_worker.store.get(str(body.script_id))
             if not prepared or prepared.get('status') != 'succeeded':
                 raise HTTPException(409, '引用的讲稿尚未生成完成')
             specification['script_modified'] = (prepared.get('result') or {}).get('spoken_script') != body.spoken_script
+            specification['original_script_sha256']=script_hash((prepared.get('result') or {}).get('spoken_script',''))
+            specification['brand_context']=(prepared.get('resolved_context') or {}).get('brand_context',{})
             frozen = (prepared.get('resolved_context') or {}).get('reference_works') or []
             if {entry['id'] for entry in frozen} == {UUID(str(identifier)).hex for identifier in body.reference_ids}:
                 knowledge.validate_references(frozen)
@@ -905,7 +1207,18 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
             elif frozen or body.reference_ids:
                 raise HTTPException(409, '讲稿所用参考与本次选择不同，请按当前参考重新生成讲稿')
         production = None
-        if narrated:
+        if vlog or story:
+            specification.update(mode=body.mode, requested_options=requested_options)
+            if story and body.spoken_script:
+                specification.update(spoken_script=body.spoken_script,script_sha256=script_hash(body.spoken_script),
+                    script_id=str(body.script_id) if body.script_id else None)
+                if prepared_assembly:
+                    specification.update(assembly_plan_id=prepared_assembly['id'],
+                        brand_context=prepared_assembly['snapshot'].get('brand_context',{}))
+            signature_value = ['creation-v3', specification, title, settings]
+            production = {'mode': body.mode, 'stage': 'queued', 'duration_policy': 'complete_narration' if story else 'source_audio',
+                          'warnings': interpretation['warnings'], 'error_code': None}
+        elif narrated:
             specification.update(mode=body.mode, spoken_script=body.spoken_script, voice_id=body.voice_id,
                 visual_fill=body.visual_fill, brand=body.brand.model_dump(), subtype=body.subtype,
                 script_id=str(body.script_id) if body.script_id else None, requested_options=requested_options,
@@ -920,15 +1233,18 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         signature = json.dumps(signature_value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
         settings['creation'] = specification
         first = snapshots[0] if snapshots else {'source':'portrait:'+portrait_snapshot['id'], 'size':0, 'mtime_ns':0}
+        request_key='assembly-render-'+str(body.assembly_plan_id) if body.assembly_plan_id else body.idempotency_key
         job, created = store.create(source=first['source'], title=title,
                                     settings=settings, fingerprint=hashlib.sha256(signature.encode()).hexdigest(),
                                     source_size=first['size'], source_mtime_ns=first['mtime_ns'],
-                                    idempotency_key=body.idempotency_key, production=production,
-                                    allow_active_merge=not bool(body.parent_job_id))
+                                    idempotency_key=request_key, production=production,
+                                    allow_active_merge=not bool(body.parent_job_id or body.assembly_plan_id))
+        if body.assembly_plan_id:
+            assemblies.update(str(body.assembly_plan_id),job_id=job['id'],error=None)
         worker.wake_event.set()
         return JSONResponse(status_code=201 if created else 200,
                             content={'job': public_job(job, inbox=inbox_path, store=store), 'created': created,
-                                     'owned_by_request': store.owned_by_request(job['id'], body.idempotency_key)})
+                                     'owned_by_request': store.owned_by_request(job['id'], request_key)})
 
     @app.post("/api/jobs", dependencies=[Depends(authorize)])
     def new_job(body: NewJob, idempotency_key: str | None = Header(default=None)):
@@ -1000,6 +1316,10 @@ def create_app(*, data_dir: str | Path | None = None, inbox: str | Path | None =
         defaults = {'mode': 'edit', 'brief': '', 'options': {}, 'spoken_script': '',
                     'voice_id': '', 'visual_fill': 'reject', 'brand': {}, 'subtype': 'salon_promo', 'presenter': None}
         draft = {key: creation.get(key, default) for key, default in defaults.items()}
+        if not draft['spoken_script'] and creation.get('mode')=='story':
+            draft['spoken_script']=(job.get('plan') or {}).get('spoken_script','') or '\n'.join(
+                scene.get('narration','') for scene in (job.get('plan') or {}).get('storyboard',{}).get('scenes',[]))
+        draft['script_id']=creation.get('script_id')
         draft['options'] = {key: value for key, value in draft['options'].items() if key in CreationOptions.model_fields}
         result = {'draft': draft,
                   'sources': [entry['source'] for entry in creation.get('sources', [])],

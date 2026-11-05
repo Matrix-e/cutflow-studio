@@ -1,43 +1,46 @@
 'use strict';
 const PRODUCTION_DRAFT='cutflow.production.draft.v1';
-const production={mode:'brand_promo',kind:'public',portraitId:null,catalog:[],catalogAt:0,catalogLoading:false,images:new Map(),uploading:false,portraitUpload:null,preferredVoice:null,voiceExplicit:false,scriptId:null,scriptBody:null,scriptJob:null,checking:false,uncertain:false,pollTimer:null,scriptContext:null,parentId:null,parentTitle:null,revisionKind:null,referenceIds:[]};
+const production={mode:'story',kind:'public',portraitId:null,catalog:[],catalogAt:0,catalogLoading:false,images:new Map(),uploading:false,portraitUpload:null,preferredVoice:null,voiceExplicit:false,scriptId:null,scriptBody:null,scriptJob:null,checking:false,uncertain:false,pollTimer:null,scriptContext:null,scriptStartValue:'',scriptAppliedId:null,parentId:null,parentTitle:null,revisionKind:null,referenceIds:[]};
 const productionFields=['productionSubtype','productionScript','productionVoice','productionStyle','productionAspect','productionDuration','productionMusic','productionSubtitles','productionLoop','productionSourceAudio','productionBrand','productionDate','productionPlace','productionCTA','productionOpeningTitle'];
-const productionChecks=new Set(['productionMusic','productionSubtitles','productionLoop']);
+productionFields.push('productionSupplementVisuals','productionGeneratedDialogue');
+const productionChecks=new Set(['productionMusic','productionSubtitles','productionLoop','productionSupplementVisuals','productionGeneratedDialogue']);
 function productionMode(){return production.mode;}
 function selectedPresenterReady(){return production.catalog.some(p=>p.id===production.portraitId&&p.kind===production.kind&&p.ready===true)&&(production.kind==='public'||$('#presenterConsent').checked);}
 function scriptRequestUncertain(error){return error.uncertain===true||error.connectivity===true||error.stale===true||!Number.isInteger(error.httpStatus)||error.httpStatus>=500;}
 function productionBrand(){return {name:$('#productionBrand').value.trim(),cta:$('#productionCTA').value.trim(),event_date:$('#productionDate').value.trim(),event_place:$('#productionPlace').value.trim()};}
 function productionContext(){return JSON.stringify({mode:production.mode,subtype:$('#productionSubtype').value,brief:$('#creatorBrief').value,brand:productionBrand(),sources:creator.selected,duration:$('#productionDuration').value,parentId:production.parentId,referenceIds:production.referenceIds});}
-function productionOptions(){return {...($('#productionOpeningTitle').value.trim()?{opening_title:$('#productionOpeningTitle').value.trim()}:{}),aspect:$('#productionAspect').value,target_duration:Number($('#productionDuration').value),music:$('#productionMusic').checked,subtitles:$('#productionSubtitles').checked,voice_style:$('#productionStyle').value,source_audio:$('#productionSourceAudio').value};}
+function productionOptions(){return {...($('#productionOpeningTitle').value.trim()?{opening_title:$('#productionOpeningTitle').value.trim()}:{}),aspect:$('#productionAspect').value,target_duration:Number($('#productionDuration').value),music:$('#productionMusic').checked,subtitles:$('#productionSubtitles').checked,voice_style:$('#productionStyle').value,source_audio:$('#productionSourceAudio').value,allow_supplemental_visuals:production.mode==='vlog'&&$('#productionSupplementVisuals')?.checked===true,allow_generated_dialogue:production.mode==='vlog'&&$('#productionGeneratedDialogue')?.checked===true};}
 function saveProductionDraft(){
   if(!localPage||typeof localStorage==='undefined')return;
-  try{localStorage.setItem(PRODUCTION_DRAFT,JSON.stringify({mode:production.mode,kind:production.kind,portraitId:production.portraitId,voiceExplicit:production.voiceExplicit,fields:Object.fromEntries(productionFields.map(id=>[id,productionChecks.has(id)?$('#'+id).checked:$('#'+id).value])),scriptId:production.scriptId,scriptBody:production.scriptBody,scriptJob:production.scriptJob,uncertain:production.uncertain,scriptContext:production.scriptContext,parentId:production.parentId,parentTitle:production.parentTitle,revisionKind:production.revisionKind,referenceIds:production.referenceIds}));}catch{}
+  try{localStorage.setItem(PRODUCTION_DRAFT,JSON.stringify({mode:production.mode,kind:production.kind,portraitId:production.portraitId,voiceExplicit:production.voiceExplicit,fields:Object.fromEntries(productionFields.map(id=>[id,productionChecks.has(id)?$('#'+id).checked:$('#'+id).value])),scriptId:production.scriptId,scriptBody:production.scriptBody,scriptJob:production.scriptJob,uncertain:production.uncertain,scriptContext:production.scriptContext,scriptStartValue:production.scriptStartValue,scriptAppliedId:production.scriptAppliedId,parentId:production.parentId,parentTitle:production.parentTitle,revisionKind:production.revisionKind,referenceIds:production.referenceIds}));}catch{}
 }
 function loadProductionDraft(){
   if(!localPage||typeof localStorage==='undefined')return;
   try{const d=JSON.parse(localStorage.getItem(PRODUCTION_DRAFT)||'null');if(d){
     if(typeof d.parentId==='string'&&/^[a-f0-9]{32}$/.test(d.parentId)&&['rewrite','presenter','remix'].includes(d.revisionKind)){production.parentId=d.parentId;production.parentTitle=String(d.parentTitle||'已有作品').slice(0,160);production.revisionKind=d.revisionKind;}
     production.referenceIds=Array.isArray(d.referenceIds)?[...new Set(d.referenceIds.filter(id=>typeof id==='string'&&/^[a-f0-9]{32}$/.test(id)))].slice(0,3):[];
-    if(['edit','brand_promo','narrated_promo','talking_head'].includes(d.mode))production.mode=d.mode;
+    if(['edit','vlog','story','brand_promo','narrated_promo','talking_head'].includes(d.mode))production.mode=d.mode;
     if(['public','personal'].includes(d.kind))production.kind=d.kind;
     if(typeof d.portraitId==='string'&&/^[a-zA-Z0-9_-]{1,100}$/.test(d.portraitId))production.portraitId=d.portraitId;
     for(const id of productionFields){const e=$('#'+id),v=d.fields?.[id];if(productionChecks.has(id)&&typeof v==='boolean')e.checked=v;else if(typeof v==='string')setDraftFieldValue(id,v.slice(0,id==='productionScript'?1500:200));}
     if(typeof d.fields?.productionVoice==='string')production.preferredVoice=d.fields.productionVoice;
     production.voiceExplicit=d.voiceExplicit===true;
+    if(typeof d.scriptStartValue==='string')production.scriptStartValue=d.scriptStartValue.slice(0,1500);if(typeof d.scriptAppliedId==='string')production.scriptAppliedId=d.scriptAppliedId;
     if(typeof d.scriptId==='string'&&/^[a-f0-9-]{36}$/i.test(d.scriptId)&&d.scriptBody?.request_id===d.scriptId){production.scriptId=d.scriptId;production.scriptBody=d.scriptBody;production.uncertain=d.uncertain===true;if(d.scriptJob?.id===d.scriptId)production.scriptJob=d.scriptJob;if(typeof d.scriptContext==='string')production.scriptContext=d.scriptContext;}
   }
   if(creator.uncertain)production.mode=creator.requestBody?.mode||'edit';
   }catch{}
 }
 function setProductionMode(mode){
-  if(creatorInputLocked()||!['edit','brand_promo','narrated_promo','talking_head'].includes(mode))return;
+  if(creatorInputLocked()||!['edit','vlog','story','brand_promo','narrated_promo','talking_head'].includes(mode))return;
+  if(typeof setDirectorActive==='function'&&director.active)setDirectorActive(false);
   production.mode=mode;saveProductionDraft();updateCreatorAccess();renderCreatorResult();
 }
 function updateProductionAccess(){
-  const mode=production.mode,isEdit=mode==='edit',isPerson=mode==='talking_head',locked=creatorInputLocked(),caps=state.config.production||{},cap=caps.modes?.[mode];
+  const mode=production.mode,isEdit=mode==='edit',isVlog=mode==='vlog',isStory=mode==='story',isPerson=mode==='talking_head',locked=creatorInputLocked(),caps=state.config.production||{},cap=caps.modes?.[mode];
   for(const el of document.querySelectorAll('[data-production-mode]')){el.classList.toggle('active',el.dataset.productionMode===mode);el.setAttribute('aria-pressed',String(el.dataset.productionMode===mode));el.disabled=locked;}
   $('#productionPresenter').hidden=!isPerson;$('#productionMaterials').hidden=isPerson;
-  $('#productionSubtypeField').hidden=mode!=='brand_promo';$('#productionScriptPanel').hidden=isEdit;$('#productionOptions').hidden=isEdit;$('#creatorOptions').hidden=!isEdit;
+  $('#productionSubtypeField').hidden=mode!=='brand_promo';$('#productionScriptPanel').hidden=isEdit||isVlog;$('#productionOptions').hidden=isEdit;$('#creatorOptions').hidden=!isEdit;
   $('#productionLoopField').hidden=isPerson;$('#productionSourceAudioField').hidden=isPerson;
   $('#productionScope').textContent=isEdit?'按所选素材顺序剪辑，保留或关闭原声，可调整标题、时长和音乐。':isPerson?'正面静图口型同步：完整朗读讲稿，身体保持静态。选择照片中的服装与背景。':'按照所选画面顺序制作，加入完整中文独白、字幕和轻音乐。画面不足时会提示你补充素材。';
   $('#creatorBrief').placeholder=isEdit?'例如：做一条30秒竖屏视频，保留原声，清理长停顿。':mode==='brand_promo'?'例如：宣传一场面向汽车租赁老板的 AI 沙龙，突出真实案例交流，让大家愿意报名。':isPerson?'例如：由一位亲切的主持人介绍我们的汽车托管服务，开头提出车主最关心的问题。':'例如：用这些素材介绍汽车托管的交接流程，专业、清楚，让车主放心。';
@@ -52,17 +55,32 @@ function updateProductionAccess(){
   $('#productionWriteScript').disabled=locked||production.checking||!state.connected||caps.script_supported!==true||!$('#creatorBrief').value.trim();
   $('#productionWriteScript').textContent=production.checking?'正在核对讲稿…':pending?'查看讲稿进度…':production.uncertain?'核对上次讲稿':production.scriptJob?.status==='failed'?'重试生成讲稿':'✦ 按想法写讲稿';
   $('#productionAdoptScript').disabled=locked||production.scriptJob?.status!=='succeeded'||production.scriptContext!==productionContext();
-  if(!isEdit){
+  if(!isEdit&&!isVlog&&!isStory){
     const selected=creatorSelection(),script=$('#productionScript').value.trim(),ready=isPerson?selectedPresenterReady()&&!production.uploading:selected.length>0&&selected.every(a=>a.ready)&&!creator.uploading;
     const tooLong=script.length>(isPerson?450:1500);
     $('#creatorGenerate').disabled=creator.busy||!state.connected||(!creator.uncertain&&(!cap?.ready||!ready||tooLong||!$('#creatorBrief').value.trim()||!voice.value||(!script&&(!caps.script_supported||pending||production.checking))));
     $('#creatorGenerate').textContent=creator.busy?'正在提交制作任务…':creator.uncertain?'核对并继续提交':!script?'先生成独白讲稿 →':'生成带声音的视频 →';
     $('#creatorReadiness').textContent=creator.uncertain?'提交结果待核对，再次点击会查找同一任务。':tooLong?'当前讲稿有 '+script.length+' 字，'+(isPerson?'人物口播最多 450 字，请先精简讲稿。':'单条最多 1500 字，请先精简讲稿。'):!cap?.ready?cap?.reason||'生成服务正在准备。':!ready?isPerson?'先选择可用的人物形象。':creatorMaterialReadiness(selected)||'先选择已经同步完成的视频素材。':!script?'写好想法后先生成讲稿；也可以直接填写独白。':'将完整朗读当前讲稿 · 生成后进入成片审核';
   }
+  if(isVlog||isStory){
+    const selected=creatorSelection(),ready=selected.length>0&&selected.every(a=>a.ready)&&!creator.uploading;
+    $('#creatorGenerate').disabled=creator.busy||!state.connected||(!creator.uncertain&&(!cap?.ready||!ready));
+    $('#creatorGenerate').textContent=creator.busy?'正在提交制作任务…':creator.uncertain?'核对并继续提交':isStory?'生成知识故事片 →':'生成原声 Vlog →';
+    $('#creatorReadiness').textContent=!ready?creatorMaterialReadiness(selected)||'先选择已经同步完成的视频素材。':isStory?'素材已就绪，开始生成故事。':'素材已就绪。';
+    $('#productionScope').textContent='完整保留素材原声并按顺序拼接。可选片尾补充画面和旁白；补画面使用生成图片加轻微运镜，补台词使用独立旁白。';
+    $('#creatorBrief').placeholder=isStory?'例如：从这次收车经历切入，讲清托管模式、车主应关注的问题，并演示小程序。也可以留空，让系统结合品牌知识策划。':'选填：希望突出的主题，或填写片头标题。';
+    $('#productionModeStatus').textContent=state.connected?'租用 GPU 制作 · 基础原声剪辑':'正在连接租用 GPU';
+  }
+  for(const id of ['productionVoice','productionStyle','productionDuration','productionLoop','productionSourceAudio'])$('#'+id).closest('label').hidden=isVlog||(isStory&&id!=='productionDuration')||(isPerson&&['productionLoop','productionSourceAudio'].includes(id));
+  $('#productionSubtitles').closest('label').hidden=false;
+  for(const id of ['productionBrand','productionDate','productionPlace','productionCTA'])$('#'+id).closest('label').hidden=isStory||isVlog;
+  for(const id of ['productionSupplementVisuals','productionGeneratedDialogue']){const e=$('#'+id);if(e){const available=id==='productionSupplementVisuals'?caps.supplements?.visuals:caps.supplements?.dialogue;e.disabled=locked||!available;e.closest('label').hidden=!isVlog;}}
   if(pending&&state.connected&&!production.uncertain&&!production.pollTimer&&!production.checking)scheduleScriptPoll();
   if(isPerson&&state.connected&&Date.now()-production.catalogAt>30000&&!production.catalogLoading)loadPresenterCatalog();
   if(typeof scheduleCreatorAssetResolution==='function')scheduleCreatorAssetResolution();
+  if(typeof syncAssetBrowsers==='function')syncAssetBrowsers();
   if(typeof renderCreatorReplacement==='function')renderCreatorReplacement();
+  if(typeof updateStoryWorkflow==='function')updateStoryWorkflow();
 }
 function scriptMessage(text,error=false){$('#productionScriptStatus').textContent=text;$('#productionScriptStatus').className='script-status'+(error?' error':'');}
 function acceptScript(job,id){
@@ -72,6 +90,8 @@ function acceptScript(job,id){
   $('#productionScriptPreview').hidden=job.status!=='succeeded';
   if(job.status==='succeeded'){$('#productionScriptSuggestion').textContent=job.result.spoken_script;$('#productionScriptAssumptions').textContent=(job.result.assumptions||[]).join('；');scriptMessage(production.scriptContext===productionContext()?'讲稿已准备好。阅读并采用后，可以继续修改。':'想法或素材已变化。这版讲稿已保留，请按当前想法重新生成。');}
   else scriptMessage(job.status==='failed'?job.error||'讲稿暂未完成，请重试。':job.status==='running'?'GPU 正在起草讲稿，通常需要几十秒…':'讲稿已加入队列，原有文字保持不变。',job.status==='failed');
+  if(job.status==='succeeded'&&production.mode==='story'&&production.scriptAppliedId!==id&&production.scriptContext===productionContext()&&$('#productionScript').value===production.scriptStartValue){$('#productionScript').value=job.result.spoken_script;production.scriptAppliedId=id;$('#productionScriptPreview').hidden=true;scriptMessage('脚本已生成，可直接修改，或继续自动选材。');}
+  if(production.mode==='story'&&production.scriptAppliedId===id)$('#productionScriptPreview').hidden=true;
   saveProductionDraft();updateProductionAccess();scheduleScriptPoll();
 }
 function scheduleScriptPoll(){clearTimeout(production.pollTimer);production.pollTimer=null;if(['queued','running'].includes(production.scriptJob?.status)&&state.connected)production.pollTimer=setTimeout(()=>{production.pollTimer=null;pollProductionScript();},2500);}
@@ -85,9 +105,9 @@ async function pollProductionScript(){
 async function writeProductionScript(){
   if(creatorInputLocked()||production.checking||!state.connected||!state.config.production?.script_supported)return;
   if(['queued','running'].includes(production.scriptJob?.status)&&!production.uncertain)return pollProductionScript();
-  const brief=$('#creatorBrief').value.trim();if(!brief){scriptMessage('先写一句你的想法。',true);return;}
+  const brief=$('#creatorBrief').value.trim()||(production.mode==='story'?'结合企业文化与品牌知识，讲清一个真实、有用的故事':'');if(!brief){scriptMessage('先写一句你的想法。',true);return;}
   const retry=production.uncertain||production.scriptJob?.status==='failed'&&production.scriptContext===productionContext();
-  if(!retry){production.scriptId=crypto.randomUUID();production.scriptBody={request_id:production.scriptId,mode:production.mode,subtype:$('#productionSubtype').value,brief,sources:production.mode==='talking_head'?[]:creatorSelection().filter(a=>a.ready).map(a=>a.source),brand:productionBrand(),target_duration:Number($('#productionDuration').value)};if(production.referenceIds?.length)production.scriptBody.reference_ids=production.referenceIds;if(production.parentId&&production.revisionKind==='rewrite')production.scriptBody.rewrite_source_id=production.parentId;production.scriptContext=productionContext();production.scriptJob=null;$('#productionScriptPreview').hidden=true;}
+  if(!retry){production.scriptStartValue=$('#productionScript').value;production.scriptAppliedId=null;production.scriptId=crypto.randomUUID();production.scriptBody={request_id:production.scriptId,mode:production.mode,subtype:$('#productionSubtype').value,brief,sources:production.mode==='talking_head'?[]:creatorSelection().filter(a=>a.ready).map(a=>a.source),brand:productionBrand(),target_duration:Number($('#productionDuration').value)};if(production.referenceIds?.length)production.scriptBody.reference_ids=production.referenceIds;if(production.parentId&&production.revisionKind==='rewrite')production.scriptBody.rewrite_source_id=production.parentId;production.scriptContext=productionContext();production.scriptJob=null;$('#productionScriptPreview').hidden=true;}
   const id=production.scriptId;production.checking=true;production.uncertain=true;saveProductionDraft();updateProductionAccess();scriptMessage('正在提交讲稿任务，已填写的独白保持不变…');
   try{
     let job;
@@ -104,9 +124,14 @@ function adoptProductionScript(){
 }
 async function generateProduction(){
   if(creator.busy||!state.connected)return;
+  if(production.mode==='story'&&!creator.uncertain&&typeof generateStoryProduction==='function')return generateStoryProduction();
   if(!creator.uncertain){
     const caps=state.config.production||{},selected=creatorSelection(),script=$('#productionScript').value.trim();
     if(!caps.modes?.[production.mode]?.ready)return;
+    if(['vlog','story'].includes(production.mode)){
+      if(!selected.length||selected.some(a=>!a.ready))return;
+      creator.requestId=crypto.randomUUID();creator.requestBody={idempotency_key:creator.requestId,mode:production.mode,sources:selected.map(a=>a.source),brief:$('#creatorBrief').value.trim()||(production.mode==='story'?'结合素材和品牌知识，制作有故事、有知识点的汽车托管视频':'完整保留原声，按所选顺序剪辑'),options:{...(production.mode==='story'?{target_duration:Number($('#productionDuration').value)}:{}),subtitles:$('#productionSubtitles').checked,aspect:$('#productionAspect').value,music:$('#productionMusic').checked,opening_title:$('#productionOpeningTitle').value.trim(),allow_supplemental_visuals:production.mode==='vlog'&&$('#productionSupplementVisuals').checked,allow_generated_dialogue:production.mode==='vlog'&&$('#productionGeneratedDialogue').checked},title:$('#creatorTitle').value.trim()};
+    } else {
     if(!script)return writeProductionScript();
     if(script.length>(production.mode==='talking_head'?450:1500))return;
     if(!$('#creatorBrief').value.trim()||!$('#productionVoice').value||(production.mode==='talking_head'?!selectedPresenterReady()||production.uploading:!selected.length||selected.some(a=>!a.ready)))return;
@@ -114,9 +139,11 @@ async function generateProduction(){
     if($('#creatorTitle').value.trim())creator.requestBody.title=$('#creatorTitle').value.trim();else if(production.scriptJob?.status==='succeeded'&&production.scriptContext===productionContext()&&production.scriptJob.result.title)creator.requestBody.title=production.scriptJob.result.title;else if(production.parentId)creator.requestBody.title=(production.parentTitle||'视频作品').slice(0,145)+' · 新版本';
     if(production.parentId){creator.requestBody.parent_job_id=production.parentId;creator.requestBody.revision_kind=production.revisionKind;}if(production.referenceIds?.length)creator.requestBody.reference_ids=production.referenceIds;if(production.scriptJob?.status==='succeeded'&&production.scriptContext===productionContext())creator.requestBody.script_id=production.scriptId;
     if(production.mode==='talking_head'){creator.requestBody.presenter={kind:production.kind,portrait_id:production.portraitId,consent_confirmed:production.kind==='public'||$('#presenterConsent').checked};creator.requestBody.visual_fill='reject';creator.requestBody.options.source_audio='mute';}
+    }
+    if(['story','vlog'].includes(production.mode)){if(production.parentId){creator.requestBody.parent_job_id=production.parentId;creator.requestBody.revision_kind=production.revisionKind==='presenter'?'remix':production.revisionKind;}if(production.referenceIds?.length)creator.requestBody.reference_ids=[...production.referenceIds];}
   }
-  creator.busy=true;creator.uncertain=true;saveCreatorDraft();saveProductionDraft();renderCreatorMaterials();creatorFeedback('已保存完整讲稿，正在提交到租用 GPU…');
-  try{const result=await api('/api/creations',{method:'POST',body:JSON.stringify(creator.requestBody)});if(!result.job?.id)throw Object.assign(new Error('制作结果需要核对，请继续使用同一任务编号。'),{uncertain:true});creator.resultId=result.job.id;creator.uncertain=false;creator.requestBody=null;creator.requestId=null;state.jobs=[result.job,...state.jobs.filter(j=>j.id!==result.job.id)];renderJobs();renderCreatorResult();creatorFeedback(result.job.status==='withdrawn'?'已找到这次提交的任务，但它已被撤回。可在任务详情中继续编辑草稿。':result.created===false?'已找到原任务，没有重复生成。':'已加入制作队列，可在下方查看进度。');await refresh(true);}
+  creator.busy=true;creator.uncertain=true;saveCreatorDraft();saveProductionDraft();renderCreatorMaterials();creatorFeedback('正在提交制作任务…');
+  try{const result=await api('/api/creations',{method:'POST',body:JSON.stringify(creator.requestBody)});if(!result.job?.id)throw Object.assign(new Error('制作结果需要核对，请继续使用同一任务编号。'),{uncertain:true});if(typeof recordStoryJobReceipt==='function')recordStoryJobReceipt(creator.requestBody,result.job);creator.resultId=result.job.id;creator.uncertain=false;creator.requestBody=null;creator.requestId=null;state.jobs=[result.job,...state.jobs.filter(j=>j.id!==result.job.id)];renderJobs();renderCreatorResult();creatorFeedback(result.job.status==='withdrawn'?'已找到这次提交的任务，但它已被撤回。可在任务详情中继续编辑草稿。':result.created===false?'已找到原任务，没有重复生成。':'已加入制作队列，可在下方查看进度。');await refresh(true);}
   catch(error){creator.uncertain=error.uncertain===true;creatorFeedback(error.message,true);}
   finally{creator.busy=false;saveCreatorDraft();renderCreatorMaterials();}
 }

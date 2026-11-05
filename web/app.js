@@ -24,12 +24,13 @@ function setMediaSource(video,status,url,valid,loadedMessage,assignSource=true){
   mediaListeners.get(video)?.();
   let checkedFailure=false;
   const active=()=>valid()&&video.src===url&&(!video.currentSrc||video.currentSrc===url);
-  const loaded=()=>{if(active()){status.textContent=loadedMessage;status.className='media-status';}};
+  const loaded=()=>{if(active()){if(video.dataset&&video.videoWidth&&video.videoHeight)video.dataset.orientation=video.videoHeight>video.videoWidth?'portrait':'landscape';status.textContent=loadedMessage;status.className='media-status';}};
   const failed=()=>{if(active()){status.textContent='视频暂时无法播放，请检查连接后重新打开，或确认原片格式是否受浏览器支持。';status.className='media-status error';if(!checkedFailure&&canStreamMedia()&&state.connected){checkedFailure=true;const address=new URL(url);api(address.pathname+address.search,{headers:{Range:'bytes=0-0'}},'headers').catch(error=>{if(active())reportError(error);});}}};
   video.addEventListener('loadedmetadata',loaded);video.addEventListener('canplay',loaded);video.addEventListener('error',failed);
-  mediaListeners.set(video,()=>{video.removeEventListener?.('loadedmetadata',loaded);video.removeEventListener?.('canplay',loaded);video.removeEventListener?.('error',failed);});if(assignSource)video.src=url;
+  mediaListeners.set(video,()=>{video.removeEventListener?.('loadedmetadata',loaded);video.removeEventListener?.('canplay',loaded);video.removeEventListener?.('error',failed);});if(assignSource){if(video.dataset)delete video.dataset.orientation;video.src=url;}
 }
 function assetName(asset){return asset?.display_name||asset?.name||asset?.source||'视频素材';}
+function friendlySourceName(source){return (String(source||'').replace(/^s:/,'').split(/[\\/]/).pop()||'未记录素材名称').replace(/--[a-f0-9]{16}(?=\.[^.]+$|$)/i,'').slice(0,240);}
 function suggestedPreset(source){return state.assets.find(a=>a.source===source)?.suggested_preset==='preserve'?'preserve':'gentle';}
 function updatePresetHelp(){const preserve=$('#editPreset').value==='preserve';$('#aspect').disabled=preserve;if(preserve)$('#aspect').value='original';$('#presetHelp').textContent=preserve?'完整保留所有画面与原有节奏，不裁剪停顿。保持原比例，仍会规范编码和整理音量；适合品牌包装、音乐片和已有成片。':'按音量检测长停顿，不会理解语义或自动删除口误。保留人物画面与原始语速；成片进入审核区。';}
 function safeVideoFilename(title){let name=String(title||'成片').replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g,'_').replace(/\.mp4$/i,'').trim().replace(/[. ]+$/g,'').slice(0,120);if(!name)name='成片';if(/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name))name='成片-'+name;return name+'.mp4';}
@@ -37,7 +38,7 @@ function downloadReviewedVideo(){if(!state.selected||isTechnicalTest(state.selec
 let toastTimer;
 function toast(message,error=false,kind=null){state.toastKind=kind||(error&&message===state.lastConnectionError?'connection':'business');$('#toast').textContent=message;$('#toast').className='toast visible'+(error?' error':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>{$('#toast').className='toast';state.toastKind=null;},6500);}
 function reportError(error){if(error.stale||(!error.uncertain&&error.connectionEpoch!==undefined&&error.connectionEpoch!==state.epoch))return;toast(error.message,true,error.uncertain?'operation-uncertain':error.connectivity?'connection':'business');}
-function showPage(name){document.body?.classList.toggle('creating',name==='create');if(name==='create'&&typeof renderCreatorMaterials==='function')renderCreatorMaterials();document.querySelectorAll('.page').forEach(el=>el.classList.toggle('active',el.id==='page-'+name));document.querySelectorAll('.nav').forEach(el=>el.classList.toggle('active',el.dataset.page===name));$('#pageTitle').textContent=({create:'开始制作',overview:'运行状态',assets:'素材库',jobs:'剪辑与审核',settings:'连接与设置',collections:'关键词采集',knowledge:'作品知识库'})[name] || '制作总览';if(name==='knowledge'&&typeof refreshKnowledge==='function'){if(typeof renderKnowledge==='function')renderKnowledge();refreshKnowledge();}if(name==='collections'&&typeof refreshCollections==='function')refreshCollections(true);if(name==='assets'&&typeof refreshLocalLibrary==='function')refreshLocalLibrary(true);}
+function showPage(name){if(typeof assetBrowserPageChanged==='function')assetBrowserPageChanged(name);document.body?.classList.toggle('creating',name==='create');if(name==='create'&&typeof renderCreatorMaterials==='function')renderCreatorMaterials();document.querySelectorAll('.page').forEach(el=>el.classList.toggle('active',el.id==='page-'+name));document.querySelectorAll('.nav').forEach(el=>el.classList.toggle('active',el.dataset.page===name));$('#pageTitle').textContent=({create:'开始制作',overview:'运行状态',assets:'素材库',jobs:'剪辑与审核',settings:'连接与设置',collections:'关键词采集',knowledge:'作品知识库'})[name] || '制作总览';if(name==='knowledge'&&typeof refreshKnowledge==='function'){if(typeof renderKnowledge==='function')renderKnowledge();refreshKnowledge();}if(name==='collections'&&typeof refreshCollections==='function')refreshCollections(true);if(name==='assets'&&typeof refreshLocalLibrary==='function')refreshLocalLibrary(true);if(name==='create'&&typeof syncAssetBrowsers==='function')syncAssetBrowsers();}
 function bytes(n){return n>=1073741824?(n/1073741824).toFixed(2)+' GB':(n/1048576).toFixed(1)+' MB';}
 function time(s){return Number.isFinite(Number(s))?Number(s).toFixed(1)+' 秒':'—';}
 function date(s){return s?new Date(typeof s==='number'?s*1000:s).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'';}
@@ -70,9 +71,10 @@ async function api(path,options={},format='json',context=connectionContext()){
   if(!context.base||!context.token)throw new Error('请先连接剪辑服务并填写工作台访问令牌。');
   const method=(options.method||'GET').toUpperCase();
   // This exact POST only reads metadata. All other POSTs retain mutation semantics.
-  const assetLookup=method==='POST'&&path==='/api/assets/resolve';
+  const assetLookup=method==='POST'&&path==='/api/assets/resolve',assetSearch=method==='GET'&&(path==='/api/assets/search'||path.startsWith('/api/assets/search?'));
+  const cancellableAssetRead=assetLookup||assetSearch;
   const readOnly=['GET','HEAD'].includes(method)||assetLookup,outdated=()=>readOnly?staleRequest():uncertainRequest();
-  const lookupSignal=assetLookup?options.signal:null,requestCurrent=()=>currentContext(context)&&!lookupSignal?.aborted;
+  const lookupSignal=cancellableAssetRead?options.signal:null,requestCurrent=()=>currentContext(context)&&!lookupSignal?.aborted;
   if(!requestCurrent())throw outdated();
   if(!readOnly&&!state.connected)throw Object.assign(new Error('连接尚未恢复，请先检查任务状态后再操作。'),{connectivity:true});
     const controller=new AbortController(),request={controller,readOnly};state.requests.add(request);const timeout=setTimeout(()=>controller.abort(),path.endsWith('/publish')?300000:format==='blob'?120000:path.startsWith('/api/presenters/import?')?60000:20000);
@@ -80,7 +82,7 @@ async function api(path,options={},format='json',context=connectionContext()){
   try{
     const response=await fetch(context.base+path,{...options,headers:{Authorization:'Bearer '+context.token,...(options.body?{'Content-Type':'application/json'}:{}),...options.headers},cache:'no-store',signal:controller.signal});
     if(!requestCurrent())throw outdated();
-    if(!response.ok){let body;try{body=await response.json();}catch{}if(!requestCurrent())throw outdated();const error=Object.assign(new Error(assetLookup?'已选素材信息暂未核对完成（'+response.status+'），请等待连接恢复或刷新素材。':typeof body?.detail==='string'?body.detail:'服务请求失败（'+response.status+'）'),{httpStatus:response.status,connectivity:response.status===401||response.status>=500,uncertain:!readOnly&&response.status>=500});if(error.connectivity)connectionFailure(context,error,response.status);throw error;}
+    if(!response.ok){let body;try{body=await response.json();}catch{}if(!requestCurrent())throw outdated();const error=Object.assign(new Error(assetLookup?'已选素材信息暂未核对完成（'+response.status+'），请等待连接恢复或刷新素材。':assetSearch?'素材搜索暂未完成（'+response.status+'），请刷新当前搜索。':typeof body?.detail==='string'?body.detail:'服务请求失败（'+response.status+'）'),{httpStatus:response.status,connectivity:response.status===401||response.status>=500,uncertain:!readOnly&&response.status>=500});if(error.connectivity)connectionFailure(context,error,response.status);throw error;}
     const value=format==='headers'?(await response.body?.cancel(),true):format==='blob'?await response.blob():await response.json();if(!requestCurrent())throw outdated();return value;
   }catch(error){
     if(lookupSignal?.aborted)throw staleRequest();
@@ -101,7 +103,7 @@ function refresh(silent=false){
   if(!state.base||!state.token){if(!silent)showPage('settings');return Promise.resolve();}
   if(state.refreshing&&currentContext(state.refreshing.context))return state.refreshing.promise;
   const flight={context:connectionContext(),promise:null};state.refreshing=flight;
-  state.assetCatalog.status='refreshing';if(typeof renderCreatorMaterials==='function')renderCreatorMaterials();
+  if(!assetCatalogUsable())state.assetCatalog.status='refreshing';
   flight.promise=(async()=>{
     let context=flight.context;
     const reviewRevision=state.reviewRequest;
@@ -134,7 +136,7 @@ function refresh(silent=false){
   })().finally(()=>{if(state.refreshing===flight)state.refreshing=null;});
   return flight.promise;
 }
-function jobRows(jobs){return jobs.map(j=>{const technical=isTechnicalTest(j),title=technical?'GPU 链路自测（彩条测试片）':j.title,label=technical?(j.result?.qc?.passed===true?'自测通过':'技术自测记录'):(statusNames[j.status]||j.status);return `<div class="job-row"><span class="job-icon">${technical?'⚙':'▷'}</span><div class="job-info"><b>${esc(title)}</b><small>${technical?'技术自测 · 非正式成片 · ':''}${esc(date(j.created_at))}${technical?'':' · '+esc(j.source?.startsWith('portrait:')?'人物口播 · 自选形象':j.source)}</small>${typeof queueDraftActionsHtml==='function'?queueDraftActionsHtml(j):''}</div><span class="status ${technical?'technical_test':esc(j.status)}">${esc(label)}</span><button class="button subtle" data-review="${esc(j.id)}">${technical?'查看自测记录':j.has_video?'查看':'详情'}</button></div>`;}).join('');}
+function jobRows(jobs){return jobs.map(j=>{const technical=isTechnicalTest(j),title=technical?'GPU 链路自测（彩条测试片）':j.title,label=technical?(j.result?.qc?.passed===true?'自测通过':'技术自测记录'):(statusNames[j.status]||j.status);return `<div class="job-row"><span class="job-icon">${technical?'⚙':'▷'}</span><div class="job-info"><b>${esc(title)}</b><small>${technical?'技术自测 · 非正式成片 · ':''}${esc(date(j.created_at))}${technical?'':' · '+esc(j.source?.startsWith('portrait:')?'人物口播 · 自选形象':friendlySourceName(j.source))}</small>${typeof queueDraftActionsHtml==='function'?queueDraftActionsHtml(j):''}</div><span class="status ${technical?'technical_test':esc(j.status)}">${esc(label)}</span><button class="button subtle" data-review="${esc(j.id)}">${technical?'查看自测记录':j.has_video?'查看':'详情'}</button></div>`;}).join('');}
 function renderJobs(){if(typeof renderProductionProgress==='function')renderProductionProgress();if(typeof renderCreatorResult==='function')renderCreatorResult();
   const technical=state.filter==='technical_test',production=state.jobs.filter(j=>!isTechnicalTest(j));
   const filtered=technical?state.technicalTests:production.filter(j=>state.filter==='all'||j.status===state.filter);

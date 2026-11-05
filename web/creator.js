@@ -3,17 +3,17 @@ const CREATOR_DRAFT='cutflow.creator.draft.v1';
 const creator={selected:[],assetLabels:{},uploads:new Map(),uploading:false,busy:false,resultId:null,requestId:null,requestBody:null,uncertain:false};
 const creatorReplacement={draft:null};
 const creatorAssetResolution={key:'',sequence:0,timer:null,controller:null,status:'idle',results:new Map(),revision:0,signature:null};
-const creatorFields=['creatorBrief','creatorTitle','creatorDuration','creatorAspect','creatorPace','creatorOriginalAudio','creatorMusic','creatorOpeningTitle'];
+const creatorFields=['creatorBrief','creatorTitle','creatorDuration','creatorAspect','creatorPace','creatorOriginalAudio','creatorMusic','creatorOpeningTitle','creatorSubtitles'];
 function setDraftFieldValue(id,value){const field=$('#'+id),text=String(value??'');if(field.tagName==='SELECT'&&text&&![...field.options].some(option=>option.value===text)){const option=document.createElement('option');option.value=text;option.textContent='草稿设置：'+text;field.appendChild(option);}field.value=text;}
 function creatorInputLocked(){return creator.busy||creator.uncertain;}
 function saveCreatorDraft(){
   if(!localPage||typeof localStorage==='undefined')return;
-  try{const assetLabels=creatorAssetLabels();localStorage.setItem(CREATOR_DRAFT,JSON.stringify({fields:Object.fromEntries(creatorFields.map(id=>[id,$('#'+id).value])),selected:creator.selected.slice(0,12),assetLabels,resultId:creator.resultId,requestId:creator.requestId,requestBody:creator.requestBody,uncertain:creator.uncertain}));}catch{}
+  try{const assetLabels=creatorAssetLabels();localStorage.setItem(CREATOR_DRAFT,JSON.stringify({fields:Object.fromEntries(creatorFields.map(id=>[id,id==='creatorSubtitles'?$('#'+id).checked:$('#'+id).value])),selected:creator.selected.slice(0,12),assetLabels,resultId:creator.resultId,requestId:creator.requestId,requestBody:creator.requestBody,uncertain:creator.uncertain}));}catch{}
 }
 function loadCreatorDraft(){
   if(!localPage||typeof localStorage==='undefined')return;
   try{const draft=JSON.parse(localStorage.getItem(CREATOR_DRAFT)||'null');if(!draft)return;
-    for(const id of creatorFields)if(typeof draft.fields?.[id]==='string')setDraftFieldValue(id,draft.fields[id].slice(0,id==='creatorBrief'?3000:160));
+    for(const id of creatorFields){if(id==='creatorSubtitles'){if(typeof draft.fields?.[id]==='boolean')$('#'+id).checked=draft.fields[id];}else if(typeof draft.fields?.[id]==='string')setDraftFieldValue(id,draft.fields[id].slice(0,id==='creatorBrief'?3000:160));}
     if(Array.isArray(draft.selected))creator.selected=[...new Set(draft.selected.filter(v=>typeof v==='string'&&v.length<=4200))].slice(0,12);
     creator.assetLabels=Object.fromEntries(creator.selected.filter(key=>typeof draft.assetLabels?.[key]==='string'&&draft.assetLabels[key].trim()).map(key=>[key,draft.assetLabels[key].trim().slice(0,240)]));
     if(typeof draft.resultId==='string'&&/^[a-zA-Z0-9_-]+$/.test(draft.resultId))creator.resultId=draft.resultId;
@@ -23,7 +23,7 @@ function loadCreatorDraft(){
 function creatorFeedback(text,error=false){$('#creatorFeedback').textContent=text;$('#creatorFeedback').className='media-status'+(error?' error':'');}
 function creatorCatalogUsable(){return typeof assetCatalogUsable==='function'&&assetCatalogUsable()===true;}
 function creatorCatalogComplete(){return typeof assetCatalogCurrent==='function'&&assetCatalogCurrent()===true;}
-function creatorLocalImportsTrusted(){return typeof localImports!=='undefined'&&!localImports.loading&&!localImports.error&&typeof localImportAvailable==='function'&&localImportAvailable()&&localImports.token===state.token;}
+function creatorLocalImportsTrusted(){return typeof localImports!=='undefined'&&!localImports.error&&typeof localImportAvailable==='function'&&localImportAvailable()&&localImports.token===state.token;}
 function creatorResolutionInputs(){
   const imports=creatorLocalImportsTrusted()?localImports.items:[],associations=new Map();
   for(const key of creator.selected.slice(0,12)){
@@ -38,7 +38,7 @@ function creatorResolutionDraftContext(inputs){
   // A confirmed l: → s: identity mapping is the same source, not a new draft.
   const p=typeof production==='undefined'?null:production;
   return JSON.stringify({selected:creator.selected.map(key=>inputs.associations.has(key)?'s:'+inputs.associations.get(key):key),
-    fields:creatorFields.map(id=>$('#'+id).value),production:p?{mode:p.mode,kind:p.kind,portraitId:p.portraitId,parentId:p.parentId,parentTitle:p.parentTitle,revisionKind:p.revisionKind,referenceIds:p.referenceIds,
+    fields:creatorFields.map(id=>id==='creatorSubtitles'?$('#'+id).checked:$('#'+id).value),production:p?{mode:p.mode,kind:p.kind,portraitId:p.portraitId,parentId:p.parentId,parentTitle:p.parentTitle,revisionKind:p.revisionKind,referenceIds:p.referenceIds,
       fields:productionFields.map(id=>productionChecks.has(id)?$('#'+id).checked:$('#'+id).value),consent:$('#presenterConsent').checked}:null});
 }
 function creatorResolutionSnapshot(){
@@ -115,9 +115,10 @@ function creatorAssetLabels(pool=creatorPool()){
   return {...creator.assetLabels};
 }
 function creatorPool(){
-  const usable=creatorCatalogUsable(),resolution=creatorResolutionSnapshot(),assets=new Map(state.assets.map(asset=>[asset.source,asset]));
-  for(const [source,result] of resolution.results)if(result.status==='found')assets.set(source,result.asset);
-  const pool=[...assets.values()].map(asset=>({key:'s:'+asset.source,source:asset.source,name:asset.display_name||asset.name||creatorSourceLabel('s:'+asset.source),size:asset.size,ready:usable,labelKnown:usable,availability:usable?'ready':'pending_catalog',status:usable?'已同步 · 可制作':'素材目录待确认'}));
+  const usable=creatorCatalogUsable(),resolution=creatorResolutionSnapshot(),assets=new Map(state.assets.map(asset=>[asset.source,asset])),unverified=new Set();
+  if(typeof creatorSelectedBrowseAssets==='function')for(const asset of creatorSelectedBrowseAssets())if(!assets.has(asset.source)){assets.set(asset.source,asset);unverified.add(asset.source);}
+  for(const [source,result] of resolution.results)if(result.status==='found'){assets.set(source,result.asset);unverified.delete(source);}
+  const pool=[...assets.values()].map(asset=>{const ready=usable&&!unverified.has(asset.source),missing=resolution.results.get(asset.source)?.status==='not_found';return {key:'s:'+asset.source,source:asset.source,name:asset.display_name||asset.name||creatorSourceLabel('s:'+asset.source),size:asset.size,ready,labelKnown:usable,availability:ready?'ready':missing?'missing':'pending_catalog',status:ready?'已同步 · 可制作':missing?'当前素材未找到 · 可在此位置替换':unverified.has(asset.source)?'已选入 · 等待核对素材':'素材目录待确认'};});
   const imports=typeof localImports==='undefined'?[]:localImports.items;
   const localTrusted=creatorLocalImportsTrusted();
   for(const item of imports){
@@ -143,17 +144,25 @@ function creatorReplacementLocked(){
   const p=typeof production==='undefined'?null:production,idea=typeof ideaAssistant==='undefined'?null:ideaAssistant;
   return creatorInputLocked()||creator.uploading||creatorResolutionPending()||(typeof localImports!=='undefined'&&localImports.busy)||!!(idea&&(idea.uncertain||idea.checking||idea.pending||['queued','running'].includes(idea.job?.status)))||!!(p&&(p.uploading||p.checking||p.uncertain||['queued','running'].includes(p.scriptJob?.status)));
 }
+let creatorGridSignature=null;
 function renderCreatorMaterials(){
+  ensureCreatorSearchControls();syncAssetBrowsers();
   scheduleCreatorAssetResolution();
   const previousLabels=JSON.stringify([creator.selected,creator.assetLabels]);
-  const pool=creatorPool(),query=$('#creatorAssetSearch').value.trim().toLowerCase(),shown=pool.filter(a=>a.name.toLowerCase().includes(query)),locked=creatorInputLocked(),replacementLocked=creatorReplacementLocked()||!creatorCatalogUsable();
-  $('#creatorAssetGrid').innerHTML=shown.length?shown.map(item=>`<article class="creator-asset-card ${creator.selected.includes(item.key)?'selected':''}"><label><input type="checkbox" data-creator-select="${esc(item.key)}" ${creator.selected.includes(item.key)?'checked':''} ${locked?'disabled':''} aria-label="选择素材：${esc(item.name)}"><span><strong>${esc(item.name)}</strong><small>${bytes(item.size||0)} · ${esc(item.status)}</small></span></label><div class="creator-card-actions">${item.source?'<button type="button" class="text-button" data-preview="'+esc(item.source)+'" '+(!item.ready?'disabled':'')+'>预览</button>':''}${item.retryId?'<button type="button" class="text-button" data-creator-retry="'+esc(item.retryId)+'" '+(locked||creator.uploading?'disabled':'')+'>核对并重试导入</button>':''}</div></article>`).join(''):'<div class="creator-asset-empty">'+(query?'当前列表没有同名素材。':creatorCatalogComplete()?'还没有视频，点击上方「上传视频」。':creatorCatalogUsable()?'当前列表暂无素材，目录尚未完整读取。':'素材目录待确认，你可以先写下想法。')+'</div>';
+  const pool=creatorPool(),query=$('#creatorAssetSearch').value.trim().toLowerCase(),search=assetBrowsers.main,shown=assetSearchSupported()?[...pool.filter(item=>item.key.startsWith('l:')&&item.name.toLowerCase().includes(query)),...assetBrowserItems(search,pool)]:pool.filter(a=>a.name.toLowerCase().includes(query)),locked=creatorInputLocked(),replacementLocked=creatorReplacementLocked()||!creatorCatalogUsable();
+  const gridSignature=JSON.stringify([shown,creator.selected,locked,assetBrowserCanChoose(search)]);
+  if(gridSignature!==creatorGridSignature){creatorGridSignature=gridSignature;
+  $('#creatorAssetGrid').innerHTML=shown.length?shown.map(item=>`<article class="creator-asset-card ${creator.selected.includes(item.key)?'selected':''}"><label><input type="checkbox" data-creator-select="${esc(item.key)}" ${item.searchAsset?'data-search-source="'+esc(item.source)+'"':''} ${creator.selected.includes(item.key)?'checked':''} ${locked||(item.searchAsset&&!assetBrowserCanChoose(search))?'disabled':''} aria-label="选择素材：${esc(item.name)}"><span><strong>${esc(item.name)}</strong><small>${bytes(item.size||0)} · ${esc(item.status)}</small></span></label>${typeof assetInsightHtml==='function'?assetInsightHtml(item):''}<div class="creator-card-actions">${item.source?'<button type="button" class="text-button" data-preview="'+esc(item.source)+'" '+(!item.ready?'disabled':'')+'>预览</button>':''}${item.retryId?'<button type="button" class="text-button" data-creator-retry="'+esc(item.retryId)+'" '+(locked||creator.uploading?'disabled':'')+'>核对并重试导入</button>':''}</div></article>`).join(''):'<div class="creator-asset-empty">'+(assetSearchSupported()?search.busy||!search.snapshot?'搜索结果尚待读取。':search.total===0?'这轮全库搜索没有匹配素材。':'当前搜索页没有可显示的素材。':query?'已加载列表中没有同名素材。':creatorCatalogComplete()?'还没有视频，点击上方「上传视频」。':'素材目录待确认，你可以先写下想法。')+'</div>';
+  }
+  if(typeof hydrateAssetInsights==='function')hydrateAssetInsights();
+  renderAssetBrowserControls(search,$('#creatorSearchStatus'),$('#creatorSearchMore'));
   const selected=creatorSelection(pool);$('#creatorSelectedCount').textContent='已选 '+selected.length+' 段';
   $('#creatorSelection').innerHTML=selected.length?selected.map((item,index)=>`<li class="creator-selected-item ${item.availability==='missing'?'is-missing':!item.ready?'is-unconfirmed':''}"><span class="creator-number">${index+1}</span><span class="creator-selected-name">${esc(item.name)}<small>${esc(item.ready?'已就绪':item.status)}</small></span><div class="creator-order-buttons"><button type="button" class="creator-replace-button" data-creator-replace="${index}" aria-label="替换第 ${index+1} 段：${esc(item.name)}" ${replacementLocked?'disabled':''}>替换</button><button type="button" data-creator-move="${index}" data-direction="-1" aria-label="上移：${esc(item.name)}" ${index===0||locked?'disabled':''}>↑</button><button type="button" data-creator-move="${index}" data-direction="1" aria-label="下移：${esc(item.name)}" ${index===selected.length-1||locked?'disabled':''}>↓</button><button type="button" data-creator-remove="${esc(item.key)}" aria-label="移除：${esc(item.name)}" ${locked?'disabled':''}>×</button></div></li>`).join(''):'<li class="help">勾选上面的素材，或上传新视频；最多选择 12 段。</li>';
   if(previousLabels!==JSON.stringify([creator.selected,creator.assetLabels]))saveCreatorDraft();
   updateCreatorAccess();renderCreatorResult();
 }
 function updateCreatorAccess(){
+  syncAssetBrowsers();
   scheduleCreatorAssetResolution();
   const selected=creatorSelection(),brief=$('#creatorBrief').value.trim(),waiting=selected.filter(a=>!a.ready).length;
   const supported=state.config.creation_supported===true,locked=creatorInputLocked();
@@ -167,6 +176,7 @@ function updateCreatorAccess(){
   if(typeof updateIdeaAccess==='function')updateIdeaAccess();
   if(typeof updateProductionAccess==='function')updateProductionAccess();
   renderCreatorReplacement();
+  if(typeof directorSync==='function')directorSync();
 }
 function toggleCreatorMaterial(key,on){
   if(creatorInputLocked())return;
@@ -178,56 +188,83 @@ function addSourceToCreator(source){
   if(creatorInputLocked())return;
   showPage('create');toggleCreatorMaterial('s:'+source,true);creatorFeedback('已加入待用素材。继续选择视频，或写下想法后生成。');
 }
-function openCreator(source){showPage('create');if(source)addSourceToCreator(source);else renderCreatorMaterials();$('#creatorBrief').focus?.();}
+function openCreator(source){showPage('create');if(source)addSourceToCreator(source);else renderCreatorMaterials();(typeof director!=='undefined'&&director.active?$('#directorGoal'):$('#creatorBrief')).focus?.();}
 function creatorOptions(){
-  const options={};const duration=$('#creatorDuration').value,aspect=$('#creatorAspect').value,pace=$('#creatorPace').value,voice=$('#creatorOriginalAudio').value,music=$('#creatorMusic').value,title=$('#creatorOpeningTitle').value.trim();
+  const options={subtitles:$('#creatorSubtitles').checked===true};const duration=$('#creatorDuration').value,aspect=$('#creatorAspect').value,pace=$('#creatorPace').value,voice=$('#creatorOriginalAudio').value,music=$('#creatorMusic').value,title=$('#creatorOpeningTitle').value.trim();
   if(duration)options.target_duration=Number(duration);if(aspect)options.aspect=aspect;if(pace)options.pace=pace;if(voice)options.keep_original_audio=voice==='true';if(music)options.music=music==='true';if(title)options.opening_title=title;
   return options;
 }
 function ensureCreatorReplacementDialog(){
   if($('#creatorReplacementDialog'))return;
   const dialog=document.createElement('dialog');dialog.id='creatorReplacementDialog';dialog.className='creator-replacement-dialog';
-  dialog.innerHTML='<div class="dialog-heading"><div><div class="eyebrow">REPLACE MATERIAL</div><h2>在原位置替换素材</h2></div><button type="button" class="close-button" id="creatorReplacementClose" aria-label="关闭替换窗口">×</button></div><p id="creatorReplacementOriginal" class="creator-replacement-original"></p><p class="help">只替换这一段，顺序、想法、讲稿和设置都保留；不会自动生成新任务。已提交任务不受影响。</p><div id="creatorReplacementStatus" class="media-status" role="status" aria-live="polite"></div><div id="creatorReplacementList" class="creator-replacement-list" role="radiogroup" aria-label="选择替换素材"></div><div class="creator-replacement-actions"><button type="button" class="button subtle" id="creatorReplacementCancel">取消</button><button type="button" class="button primary" id="creatorReplacementApply" disabled>确认替换这一段</button></div>';
+  dialog.innerHTML='<div class="dialog-heading"><div><div class="eyebrow">REPLACE MATERIAL</div><h2>在原位置替换素材</h2></div><button type="button" class="close-button" id="creatorReplacementClose" aria-label="关闭替换窗口">×</button></div><p id="creatorReplacementOriginal" class="creator-replacement-original"></p><p class="help">只替换这一段，顺序、想法、讲稿和设置都保留；不会自动生成新任务。已提交任务不受影响。</p><label class="creator-search">查找替换素材<input id="creatorReplacementSearch" type="search" maxlength="100" placeholder="按视频名称查找" autocomplete="off"></label><div class="creator-search-controls"><p id="creatorReplacementSearchStatus" class="help" role="status" aria-live="polite"></p><button type="button" class="text-button" id="creatorReplacementRefresh">刷新搜索</button><button type="button" class="button subtle" id="creatorReplacementMore" hidden>加载更多素材</button></div><div id="creatorReplacementStatus" class="media-status" role="status" aria-live="polite"></div><div id="creatorReplacementList" class="creator-replacement-list" role="radiogroup" aria-label="选择替换素材"></div><div class="creator-replacement-actions"><button type="button" class="button subtle" id="creatorReplacementCancel">取消</button><button type="button" class="button primary" id="creatorReplacementApply" disabled>确认替换这一段</button></div>';
   document.body.appendChild(dialog);
-  const close=()=>{creatorReplacement.draft=null;dialog.close();};
+  const close=()=>{creatorReplacement.draft?.verifyController?.abort();cancelAssetBrowser(assetBrowsers.replacement);creatorReplacement.draft=null;dialog.close();};
   $('#creatorReplacementClose').onclick=close;$('#creatorReplacementCancel').onclick=close;
   dialog.addEventListener('cancel',event=>{event.preventDefault();close();});
-  dialog.addEventListener('close',()=>{if(!dialog.open)creatorReplacement.draft=null;});
-  $('#creatorReplacementList').addEventListener('change',event=>{const radio=event.target.closest('[data-replacement-key]'),draft=creatorReplacement.draft;if(!radio||!draft||radio.disabled)return;draft.choice=radio.dataset.replacementKey;renderCreatorReplacement();});
+  dialog.addEventListener('close',()=>{if(!dialog.open){creatorReplacement.draft?.verifyController?.abort();cancelAssetBrowser(assetBrowsers.replacement);creatorReplacement.draft=null;}});
+  $('#creatorReplacementList').addEventListener('change',event=>{const radio=event.target.closest('[data-replacement-key]'),draft=creatorReplacement.draft;if(!radio||!draft||radio.disabled||draft.verifying)return;draft.choice=radio.dataset.replacementKey;renderCreatorReplacement();});
   $('#creatorReplacementApply').onclick=applyCreatorReplacement;
+  $('#creatorReplacementSearch').oninput=()=>{const draft=creatorReplacement.draft;if(draft){draft.verifyController?.abort();draft.choice=null;}changeAssetBrowserQuery(assetBrowsers.replacement,$('#creatorReplacementSearch').value);};
+  $('#creatorReplacementRefresh').onclick=()=>{if(creatorReplacement.draft?.verifying)return;if(creatorReplacement.draft)creatorReplacement.draft.choice=null;refreshAssetBrowser(assetBrowsers.replacement);};
+  $('#creatorReplacementMore').onclick=()=>requestAssetBrowser(assetBrowsers.replacement,true);
 }
-function creatorReplacementContext(){return typeof variantDraftContext==='function'?variantDraftContext():JSON.stringify({selected:creator.selected,fields:creatorFields.map(id=>$('#'+id).value)});}
+function creatorReplacementContext(){return typeof variantDraftContext==='function'?variantDraftContext():JSON.stringify({selected:creator.selected,fields:creatorFields.map(id=>id==='creatorSubtitles'?$('#'+id).checked:$('#'+id).value)});}
 function openCreatorReplacement(index){
   if(creatorReplacementLocked()||!creatorCatalogUsable())return;
   const selected=creatorSelection(),original=selected[index];if(!Number.isInteger(index)||!original)return;
   ensureCreatorReplacementDialog();
   creatorReplacement.draft={index,key:original.key,name:original.name,choice:null,base:state.base,token:state.token,epoch:state.epoch,revision:state.assetCatalog?.revision,resolutionRevision:creatorAssetResolution.revision,context:creatorReplacementContext(),invalid:false};
-  renderCreatorReplacement();if(!$('#creatorReplacementDialog').open)$('#creatorReplacementDialog').showModal();
+  $('#creatorReplacementSearch').value='';resetAssetBrowser(assetBrowsers.replacement,'');if(!$('#creatorReplacementDialog').open)$('#creatorReplacementDialog').showModal();renderCreatorReplacement();
 }
 function creatorReplacementState(draft,pool){
   if(draft.invalid||state.base!==draft.base||state.token!==draft.token||state.epoch!==draft.epoch||state.assetCatalog?.revision!==draft.revision||creatorAssetResolution.revision!==draft.resolutionRevision||creator.selected[draft.index]!==draft.key||creatorReplacementContext()!==draft.context){draft.invalid=true;return {message:'素材目录、核对结果、连接、原位置或草稿内容已经变化，请关闭窗口后重新选择。',candidates:[],blocked:true};}
   if(creatorResolutionPending())return {message:'正在核对已选素材，确认完成后才能替换。原位置和候选选择保持不变。',candidates:[],blocked:true};
   if(creatorReplacementLocked())return {message:'当前正在上传、生成想法或讲稿、核对提交，暂不能替换。原选择保持不变。',candidates:[],blocked:true};
   if(!creatorCatalogUsable())return {message:'正在确认素材目录，请等待最新读取完成；不会使用未经确认的素材替换。',candidates:[],blocked:true};
-  const candidates=pool.filter(item=>item.ready&&item.source&&!creator.selected.includes(item.key));
-  return {message:candidates.length?(creatorCatalogComplete()?'选择一段已同步素材，再确认替换。':'当前目录未完整列出；这里只展示已确认可用且尚未选择的素材。'):'没有可替换的已同步素材。已选素材不会重复列出；可关闭后先导入或同步其他视频。',candidates,blocked:false};
+  const session=assetBrowsers.replacement,query=$('#creatorReplacementSearch').value.trim().toLowerCase();
+  const candidates=(assetSearchSupported()?assetBrowserItems(session,pool):pool.filter(item=>item.ready&&item.name.toLowerCase().includes(query))).filter(item=>item.source&&!creator.selected.includes(item.key));
+  if(assetSearchSupported()&&!assetBrowserCanChoose(session))return {message:'请先完成或刷新这轮搜索；原位置和已选素材保留。',candidates,blocked:true};
+  return {message:candidates.length?'选择一段素材并确认替换。当前目录外的素材会先核对可用性，再修改草稿。':'这轮已加载结果中没有可替换素材；已选素材不会重复列出，可继续加载或换名称查找。',candidates,blocked:false};
 }
 function renderCreatorReplacement(){
+  syncAssetBrowsers();
   const disabled=creatorReplacementLocked()||!creatorCatalogUsable();document.querySelectorAll('[data-creator-replace]').forEach(button=>{button.disabled=disabled;});
   const draft=creatorReplacement.draft;if(!draft||!$('#creatorReplacementDialog'))return;
   const view=creatorReplacementState(draft,creatorPool());
+  if(view.blocked&&draft.verifying)draft.verifyController?.abort();
   $('#creatorReplacementOriginal').textContent='第 '+(draft.index+1)+' 段：'+draft.name;
-  $('#creatorReplacementStatus').textContent=view.message;
-  $('#creatorReplacementList').innerHTML=view.candidates.map(item=>'<label class="creator-replacement-option"><input type="radio" name="creatorReplacement" data-replacement-key="'+esc(item.key)+'" '+(draft.choice===item.key?'checked':'')+'><span><strong>'+esc(item.name)+'</strong><small>'+esc(bytes(item.size||0))+' · 已同步</small></span></label>').join('');
-  $('#creatorReplacementApply').disabled=view.blocked||!view.candidates.some(item=>item.key===draft.choice);
+  $('#creatorReplacementStatus').textContent=draft.verifying?'正在核对替换素材，原草稿尚未改变…':draft.verifyMessage||view.message;
+  $('#creatorReplacementList').innerHTML=view.candidates.map(item=>'<label class="creator-replacement-option"><input type="radio" name="creatorReplacement" data-replacement-key="'+esc(item.key)+'" '+(draft.choice===item.key?'checked':'')+' '+(view.blocked||draft.verifying?'disabled':'')+'><span><strong>'+esc(item.name)+'</strong><small>'+esc(bytes(item.size||0))+' · '+(item.ready?'当前已确认':'确认替换前核对')+'</small></span></label>').join('');
+  const candidate=view.candidates.find(item=>item.key===draft.choice);
+  $('#creatorReplacementApply').disabled=view.blocked||draft.verifying||!candidate||(!candidate.ready&&state.config.asset_resolution_supported!==true);
+  $('#creatorReplacementApply').textContent=draft.verifying?'正在核对素材…':'确认替换这一段';
+  renderAssetBrowserControls(assetBrowsers.replacement,$('#creatorReplacementSearchStatus'),$('#creatorReplacementMore'));
+  $('#creatorReplacementSearch').disabled=!!draft.verifying;$('#creatorReplacementRefresh').disabled=!!draft.verifying||!state.connected;if(draft.verifying)$('#creatorReplacementMore').disabled=true;
 }
-function applyCreatorReplacement(){
-  const draft=creatorReplacement.draft;if(!draft)return;
+async function applyCreatorReplacement(){
+  const draft=creatorReplacement.draft;if(!draft||draft.verifying)return;
   // Recheck the exact directory revision and original slot at the moment of confirmation.
   const view=creatorReplacementState(draft,creatorPool()),candidate=view.candidates.find(item=>item.key===draft.choice);
   if(view.blocked||!candidate){renderCreatorReplacement();return;}
+  draft.verifyMessage='';
+  if(!candidate.ready){
+    if(state.config.asset_resolution_supported!==true)return;
+    const controller=new AbortController(),context=connectionContext(),session=assetBrowsers.replacement,snapshot=session.snapshot,query=session.query;
+    draft.verifyController=controller;draft.verifying=true;renderCreatorReplacement();
+    try{
+      const response=await api('/api/assets/resolve',{method:'POST',body:JSON.stringify({sources:[candidate.source]}),signal:controller.signal},'json',context);
+      if(creatorReplacement.draft!==draft||!currentContext(context)||controller.signal.aborted)return;
+      const current=creatorReplacementState(draft,creatorPool()),record=response?.results?.[0];
+      if(current.blocked||session.snapshot!==snapshot||session.query!==query||!current.candidates.some(item=>item.key===candidate.key))throw new Error('草稿或搜索状态已变化，请重新选择替换素材。');
+      if(response?.limit!==12||response.results.length!==1||record?.source!==candidate.source||record.status!=='found'||!validBrowserAsset(record.asset)||record.asset.source!==candidate.source){session.status='stale';session.message='该素材暂未确认可用，请刷新搜索后重新选择。';draft.choice=null;throw new Error('替换素材暂未确认可用，原草稿未改变。');}
+      rememberCreatorBrowsedAsset(record.asset);
+    }catch{if(creatorReplacement.draft===draft)draft.verifyMessage='替换素材核对未完成，原草稿未改变。请确认搜索状态后再试。';return;}
+    finally{draft.verifying=false;draft.verifyController=null;if(creatorReplacement.draft===draft)renderCreatorReplacement();}
+    if(creatorReplacement.draft!==draft||!currentContext(context)||controller.signal.aborted||creatorReplacementState(draft,creatorPool()).blocked)return;
+  }else if(candidate.searchAsset)rememberCreatorBrowsedAsset(candidate.searchAsset);
   creator.selected[draft.index]=candidate.key;creator.assetLabels[candidate.key]=candidate.name.slice(0,240);
-  creatorReplacement.draft=null;$('#creatorReplacementDialog').close();saveCreatorDraft();renderCreatorMaterials();
+  cancelAssetBrowser(assetBrowsers.replacement);creatorReplacement.draft=null;$('#creatorReplacementDialog').close();saveCreatorDraft();renderCreatorMaterials();
   creatorFeedback('第 '+(draft.index+1)+' 段已替换为“'+candidate.name+'”。其他内容保留，尚未提交制作。');
 }
 async function uploadCreatorOne(id){
@@ -294,15 +331,15 @@ function renderCreationReview(job){
   $('#creationReviewBrief').hidden=!job.brief;
   $('#creationReviewBrief').innerHTML=job.brief?'<strong>你对这条视频的想法</strong><p>'+esc(job.brief)+'</p><details><summary>实际制作方案与所用素材</summary>'+creationPlanHtml(job)+'<ol>'+(job.sources||[]).map(s=>'<li>'+esc(assetName(state.assets.find(a=>a.source===s)||{source:s}))+'</li>').join('')+'</ol></details>':'';
 }
-$('#creatorNext').onclick=()=>$('#creatorBrief').focus?.();
+$('#creatorNext').onclick=()=>(typeof director!=='undefined'&&director.active?$('#directorGoal'):$('#creatorBrief')).focus?.();
 $('#creatorUploadButton').onclick=()=>{if(!creatorInputLocked()&&!creator.uploading)$('#creatorFileInput').click();};
 $('#creatorFileInput').onchange=()=>uploadCreatorFiles($('#creatorFileInput').files||[]);
-$('#creatorAssetSearch').oninput=renderCreatorMaterials;
+$('#creatorAssetSearch').oninput=()=>changeAssetBrowserQuery(assetBrowsers.main,$('#creatorAssetSearch').value);
 $('#creatorGenerate').onclick=generateCreation;
-$('#creatorRefreshAssets').onclick=async()=>{await Promise.allSettled([refresh(true),refreshLocalLibrary(true)]);renderCreatorMaterials();};
+$('#creatorRefreshAssets').onclick=async()=>{const session=assetBrowsers.main;cancelAssetBrowser(session);session.initialized=true;const sequence=session.sequence,context=connectionContext();await Promise.allSettled([refresh(true),refreshLocalLibrary(true)]);if(currentContext(context)&&session.sequence===sequence&&assetSearchSupported())refreshAssetBrowser(session);else renderCreatorMaterials();};
 $('#creatorClearSelection').onclick=()=>{if(!creatorInputLocked()){creator.selected=[];saveCreatorDraft();renderCreatorMaterials();}};
 for(const id of creatorFields)$('#'+id).addEventListener('input',()=>{saveCreatorDraft();updateCreatorAccess();});
-document.addEventListener('change',event=>{const checkbox=event.target.closest('[data-creator-select]');if(checkbox)toggleCreatorMaterial(checkbox.dataset.creatorSelect,checkbox.checked);});
+document.addEventListener('change',event=>{const checkbox=event.target.closest('[data-creator-select]');if(checkbox){if(checkbox.dataset.searchSource)selectCreatorSearchResult(checkbox.dataset.searchSource,checkbox.checked);else toggleCreatorMaterial(checkbox.dataset.creatorSelect,checkbox.checked);}});
 document.addEventListener('click',event=>{
   const replacement=event.target.closest('[data-creator-replace]');if(replacement&&!replacement.disabled)openCreatorReplacement(Number(replacement.dataset.creatorReplace));
   const add=event.target.closest('[data-add-to-creator]');if(add)addSourceToCreator(add.dataset.addToCreator);

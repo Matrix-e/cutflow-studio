@@ -30,6 +30,7 @@ UPSTREAM = 'http://127.0.0.1:8766'
 PORT = 8767
 MAX_REQUEST_BYTES = 65536
 MAX_PORTRAIT_BYTES = 8 * 1024 * 1024
+MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024
 RESPONSE_HEADERS = {'content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range'}
 LOGGER = logging.getLogger('cutflow.local_gateway')
 API_TIMEOUT = httpx.Timeout(8, connect=3, pool=3)
@@ -198,14 +199,16 @@ def create_app(*, gpu_token: str, local_token: str | None = None,
     @app.api_route('/api/{path:path}', methods=['GET', 'POST', 'PATCH', 'PUT'])
     async def proxy(path: str, request: Request):
         portrait_image = request.method == 'GET' and re.fullmatch(r'presenters/[A-Za-z0-9_-]+/image', path) is not None
-        media_get = request.method == 'GET' and (path == 'assets/video' or re.fullmatch(r'jobs/[A-Za-z0-9_-]+/video', path) is not None or portrait_image)
+        production_media = request.method == 'GET' and re.fullmatch(r'productions/[A-Za-z0-9_-]+/(?:video|artifacts/(?:cover|subtitles|record|package|copy|video))', path) is not None
+        media_get = request.method == 'GET' and (path == 'assets/video' or re.fullmatch(r'jobs/[A-Za-z0-9_-]+/video', path) is not None or portrait_image or production_media)
         cookie_authorized = media_get and hmac.compare_digest(request.cookies.get('cutflow_media', '').encode(), desktop_token.encode())
         if not authorized(request) and not cookie_authorized:
             return unauthorized()
         if not re.fullmatch(r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*', path):
             return JSONResponse({'detail': '请求路径无效。'}, status_code=400)
         portrait_import = request.method == 'POST' and path == 'presenters/import'
-        request_limit = MAX_PORTRAIT_BYTES if portrait_import else MAX_REQUEST_BYTES
+        screenshot_import = request.method == 'POST' and path == 'brand-context/screenshots'
+        request_limit = MAX_PORTRAIT_BYTES if portrait_import else MAX_SCREENSHOT_BYTES if screenshot_import else MAX_REQUEST_BYTES
         content = bytearray()
         async for chunk in request.stream():
             if len(content) + len(chunk) > request_limit:
@@ -217,12 +220,13 @@ def create_app(*, gpu_token: str, local_token: str | None = None,
                 headers[name] = request.headers[name]
         query = [(k, v) for k, v in request.query_params.multi_items() if k.lower() != 'token']
         url = httpx.URL(UPSTREAM).copy_with(path='/api/' + path, query=str(httpx.QueryParams(query)).encode())
-        is_video = request.method == 'GET' and path.endswith('/video')
+        is_video = request.method == 'GET' and (path.endswith('/video') or production_media)
         is_publish = request.method == 'POST' and re.fullmatch(r'jobs/[A-Za-z0-9_-]+/publish', path) is not None
         portrait_validate = request.method == 'POST' and re.fullmatch(r'presenters/[A-Za-z0-9_-]+/validate', path) is not None
         portrait_write = portrait_import or portrait_validate
-        timeout = PUBLISH_TIMEOUT if is_publish else PORTRAIT_TIMEOUT if portrait_write else VIDEO_TIMEOUT if is_video else API_TIMEOUT
-        deadline = PUBLISH_DEADLINE_SECONDS if is_publish else PORTRAIT_DEADLINE_SECONDS if portrait_write else ATTEMPT_DEADLINE_SECONDS
+        image_write = portrait_write or screenshot_import
+        timeout = PUBLISH_TIMEOUT if is_publish else PORTRAIT_TIMEOUT if image_write else VIDEO_TIMEOUT if is_video else API_TIMEOUT
+        deadline = PUBLISH_DEADLINE_SECONDS if is_publish else PORTRAIT_DEADLINE_SECONDS if image_write else ATTEMPT_DEADLINE_SECONDS
         attempts = 2 if request.method == 'GET' else 1
         upstream = None
 

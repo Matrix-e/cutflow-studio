@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .ideas_service import IdeaWorker, timestamp
-from . import script_model
+from . import script_model, brand_context
 
 
 class BrandDetails(BaseModel):
@@ -36,7 +37,7 @@ class BrandDetails(BaseModel):
 class NewScript(BaseModel):
     model_config = ConfigDict(extra='forbid')
     request_id: UUID
-    mode: Literal['talking_head', 'narrated_promo', 'brand_promo'] = 'narrated_promo'
+    mode: Literal['talking_head', 'narrated_promo', 'brand_promo', 'story'] = 'narrated_promo'
     brief: str = Field(min_length=1, max_length=3000)
     sources: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(default_factory=list, max_length=12)
     brand: BrandDetails = Field(default_factory=BrandDetails)
@@ -104,6 +105,12 @@ class ScriptStore:
         record['source_names'] = json.loads(record['source_names'])
         record['resolved_context'] = json.loads(record.get('resolved_context') or '{}')
         record['result'] = json.loads(record['result']) if record['result'] else None
+        snapshot=record['resolved_context'].get('brand_context') or {}
+        record['brand_context_revision']=record['resolved_context'].get('brand_context_revision',snapshot.get('revision'))
+        spoken=(record['result'] or {}).get('spoken_script')
+        record['script_sha256']=hashlib.sha256(spoken.encode('utf-8')).hexdigest() if isinstance(spoken,str) else None
+        if record['result'] is not None:
+            record['result'].update(script_sha256=record['script_sha256'],brand_context_revision=record['brand_context_revision'])
         record['can_retry'] = record['status'] == 'failed'
         return record
 
@@ -162,6 +169,19 @@ class ScriptStore:
             conn.execute("UPDATE scripts SET status='running',attempts=attempts+1,updated_at=? WHERE id=?", (timestamp(), row['id']))
             return self.decode(conn.execute('SELECT * FROM scripts WHERE id=?', (row['id'],)).fetchone())
 
+    def freeze_brand_context(self, identifier, snapshot):
+        """Pin older queued records once; retries never re-read changing facts."""
+        with self.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row=conn.execute('SELECT resolved_context FROM scripts WHERE id=?',(identifier,)).fetchone()
+            if row is None:raise script_model.ScriptModelError('invalid_request')
+            context=json.loads(row['resolved_context'] or '{}')
+            if 'brand_context' not in context:
+                context.update(brand_context=snapshot,brand_context_revision=snapshot['revision'])
+                conn.execute('UPDATE scripts SET resolved_context=? WHERE id=?',
+                             (json.dumps(context,ensure_ascii=False),identifier))
+            return context
+
     def complete(self, identifier, *, result=None, code=None):
         with self.connection() as conn:
             conn.execute("UPDATE scripts SET status=?,result=?,error=?,error_code=?,updated_at=? WHERE id=? AND status='running'",
@@ -204,6 +224,9 @@ class ScriptWorker(IdeaWorker):
                 self.store.complete(request['id'], code='not_configured')
                 return
             context = request.get('resolved_context') or {}
+            if 'brand_context' not in context:
+                context=self.store.freeze_brand_context(request['id'],
+                    brand_context.model_context(self.store.path.parent,query=request['brief']))
             references = context.get('reference_works') or []
             try:
                 if self.source_allowed and any(self.source_allowed(source) is not True for source in context.get('validated_sources', request.get('sources', []))):
@@ -217,8 +240,8 @@ class ScriptWorker(IdeaWorker):
                 raise script_model.ScriptModelError('reference_unavailable') from None
             values = script_model._request(request['brief'], request['source_names'], mode=request['mode'],
                 brand=request['brand'], subtype=request['subtype'], target_duration=request['target_duration'],
-                reference_works=references, original_script=context.get('original_script'))
-            raw = self.provider.generate_script(**values, stop_event=self.stop_event)
+                reference_works=references, original_script=context.get('original_script'),brand_context=context['brand_context'])
+            raw = self.provider.generate_script(**copy.deepcopy(values), stop_event=self.stop_event)
             result = script_model.validate_result(raw, values)
             self.store.complete(request['id'], code='cancelled' if self.stop_event.is_set() else None,
                                 result=None if self.stop_event.is_set() else result)
@@ -267,7 +290,9 @@ def register_script_routes(app, authorize, inbox, data, *, source_validator, nam
                 raise HTTPException(400, '所选素材不能用于正式讲稿，请移除技术测试或不可用素材。')
             names.append(name_formatter(normalized))
             normalized_sources.append(normalized)
-        context = {'validated_sources': normalized_sources} if normalized_sources else {}
+        snapshot=brand_context.model_context(data,query=body.brief)
+        context = {'brand_context':snapshot,'brand_context_revision':snapshot['revision']}
+        if normalized_sources:context['validated_sources']=normalized_sources
         if body.reference_ids:
             if reference_resolver is None:
                 raise HTTPException(503, '参考作品服务尚未接通。')
@@ -284,7 +309,8 @@ def register_script_routes(app, authorize, inbox, data, *, source_validator, nam
         try:
             script_model._request(body.brief, names, mode=body.mode, brand=body.brand.model_dump(),
                 subtype=body.subtype, target_duration=body.target_duration,
-                reference_works=context.get('reference_works'), original_script=context.get('original_script'))
+                reference_works=context.get('reference_works'), original_script=context.get('original_script'),
+                brand_context=snapshot)
         except script_model.ScriptModelError as exc:
             raise HTTPException(400, str(exc)) from None
         record = worker.store.create(identifier, request, names, context)

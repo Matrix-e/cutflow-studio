@@ -114,6 +114,11 @@ class Store:
             return conn.execute("SELECT 1 FROM jobs WHERE id=? AND idempotency_key=?",
                                 (job_id,request_key)).fetchone() is not None
 
+    def get_by_request(self, request_key: str):
+        with self.connection() as conn:
+            row=conn.execute('SELECT * FROM jobs WHERE idempotency_key=?',(request_key,)).fetchone()
+            return self.decode(row) if row else None
+
     def list(self, limit: int = 100, kind: str = "production"):
         if kind not in {"production", "technical_test", "all"}:
             raise ValueError("Invalid job kind")

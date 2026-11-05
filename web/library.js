@@ -1,6 +1,6 @@
 'use strict';
 const knowledgeUI={items:[],busy:false,loaded:false,editing:null,editEpoch:0,revision:0,variant:null,variantRequest:0,conflict:null};
-const workLabels={edit:'原声剪辑',talking_head:'人物口播',narrated_promo:'独白宣传',brand_promo:'企业／沙龙宣传'};
+const workLabels={story:'知识故事片',vlog:'原声 Vlog',edit:'原声剪辑',talking_head:'人物口播',narrated_promo:'独白宣传',brand_promo:'企业／沙龙宣传'};
 function completedWork(job){return !!job&&!isTechnicalTest(job)&&job.has_video&&['review','approved','published'].includes(job.status)&&job.result?.qc?.passed===true;}
 function renderWorkActions(job){
   const node=$('#workActions');if(!node)return;node.hidden=!completedWork(job);if(node.hidden){node.innerHTML='';return;}
@@ -54,11 +54,11 @@ async function prepareWorkVariant(id,kind){
     else{await applyWorkDraft(data,kind);toast('原讲稿和设置已带入，选择新人物后生成新版本。');$('#productionPresenter').scrollIntoView({behavior:'smooth',block:'start'});}
   }catch(e){toast(e.message,true);}
 }
-function variantDraftContext(){return JSON.stringify({context:productionContext(),fields:productionFields.map(id=>productionChecks.has(id)?$('#'+id).checked:$('#'+id).value),creatorFields:creatorFields.map(id=>$('#'+id).value),parentTitle:production.parentTitle,revisionKind:production.revisionKind,portrait:production.portraitId,kind:production.kind,consent:$('#presenterConsent').checked});}
+function variantDraftContext(){return JSON.stringify({context:productionContext(),fields:productionFields.map(id=>productionChecks.has(id)?$('#'+id).checked:$('#'+id).value),creatorFields:creatorFields.map(id=>id==='creatorSubtitles'?$('#'+id).checked:$('#'+id).value),parentTitle:production.parentTitle,revisionKind:production.revisionKind,portrait:production.portraitId,kind:production.kind,consent:$('#presenterConsent').checked});}
 async function applyWorkDraft(data,kind){
   if(creatorInputLocked()||production.checking||production.uncertain||['queued','running'].includes(production.scriptJob?.status)||creator.uploading||production.uploading)throw new Error('请先完成或核对当前制作任务');
   const withdrawn=kind==='withdrawn',d=data.draft,options=d?.options||{};
-  if(!d||!['edit','brand_promo','narrated_promo','talking_head'].includes(d.mode||'edit'))throw new Error('该草稿类型暂不支持继续编辑。');
+  if(!d||!['edit','vlog','story','brand_promo','narrated_promo','talking_head'].includes(d.mode||'edit'))throw new Error('该草稿类型暂不支持继续编辑。');
   if(withdrawn&&(state.config.queue_withdrawal_supported!==true||data.draft_kind!=='withdrawn'))throw new Error('当前工作台尚不支持恢复撤回草稿。');
   if(typeof stashBeforeWorkVariant==='function')stashBeforeWorkVariant();
   production.mode=d.mode||'edit';production.parentId=data.parent_job_id||null;production.parentTitle=withdrawn?(data.parent_title||null):data.title;production.revisionKind=withdrawn?(data.revision_kind||null):kind;production.referenceIds=withdrawn?[...(data.reference_ids||[])]:[];production.scriptId=null;production.scriptJob=null;production.scriptBody=null;production.scriptContext=null;production.uncertain=false;clearTimeout(production.pollTimer);production.pollTimer=null;$('#productionScriptPreview').hidden=true;scriptMessage('');
@@ -70,13 +70,15 @@ async function applyWorkDraft(data,kind){
   for(const [key,id] of Object.entries({target_duration:'creatorDuration',aspect:'creatorAspect',pace:'creatorPace',keep_original_audio:'creatorOriginalAudio',music:'creatorMusic',opening_title:'creatorOpeningTitle'}))setDraftFieldValue(id,production.mode==='edit'?(options[key]??''):'');
   for(const [key,id] of Object.entries({name:'productionBrand',cta:'productionCTA',event_date:'productionDate',event_place:'productionPlace'}))$('#'+id).value=d.brand?.[key]||'';
   for(const [key,id,fallback] of [['opening_title','productionOpeningTitle',''],['aspect','productionAspect','9:16'],['voice_style','productionStyle','professional'],['source_audio','productionSourceAudio','mute'],['target_duration','productionDuration',45]])setDraftFieldValue(id,options[key]??fallback);
+  $('#creatorSubtitles').checked=options.subtitles!==false;$('#productionSupplementVisuals').checked=options.allow_supplemental_visuals===true;$('#productionGeneratedDialogue').checked=options.allow_generated_dialogue===true;
   $('#productionMusic').checked=options.music===true;$('#productionSubtitles').checked=options.subtitles!==false;$('#productionLoop').checked=d.visual_fill==='loop';production.preferredVoice=d.voice_id||null;production.voiceExplicit=true;setDraftFieldValue('productionVoice',d.voice_id||'');
   production.kind=d.presenter?.kind||'public';production.portraitId=kind==='presenter'?null:(d.presenter?.portrait_id||null);$('#presenterConsent').checked=!!d.presenter?.consent_confirmed;document.querySelectorAll('[data-presenter-kind]').forEach(e=>e.classList.toggle('active',e.dataset.presenterKind===production.kind));
+  if(typeof setDirectorActive==='function')setDirectorActive(false);
   $('#reviewDialog').close();showPage('create');renderCreatorMaterials();updateProductionAccess();renderCreatorResult();renderWorkContext();saveCreatorDraft();saveProductionDraft();if(production.mode==='talking_head')await loadPresenterCatalog();
 }
 async function rewriteWork(){
   const instruction=$('#variantInstruction').value.trim();if(!instruction){$('#variantStatus').textContent='写一句希望怎么改，也可点上面的快捷选项。';return;}$('#variantRewrite').disabled=true;
-  try{await applyWorkDraft(knowledgeUI.variant,'rewrite');$('#creatorBrief').value='修改这条作品的讲稿：'+instruction;saveCreatorDraft();saveProductionDraft();$('#variantDialog').close();await writeProductionScript();$('#productionScriptPanel').scrollIntoView({behavior:'smooth',block:'start'});}
+  try{await applyWorkDraft(knowledgeUI.variant,'rewrite');$('#creatorBrief').value='修改这条作品的讲稿：'+instruction;saveCreatorDraft();saveProductionDraft();$('#variantDialog').close();if(production.mode==='story'){updateProductionAccess();$('#creatorBrief').focus();toast('修改方向已带入，点击生成新版本。');}else{await writeProductionScript();$('#productionScriptPanel').scrollIntoView({behavior:'smooth',block:'start'});}}
   catch(e){$('#variantStatus').textContent=e.message;}finally{$('#variantRewrite').disabled=false;}
 }
 document.addEventListener('click',event=>{

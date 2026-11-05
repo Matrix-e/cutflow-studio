@@ -9,13 +9,19 @@ from datetime import datetime, timezone
 import math
 
 STAGE_LABELS = {
+    "planning_story":"策划故事", "captioning":"制作字幕",
+    "planning_supplement": "起草衔接内容", "generating_visuals": "生成补充画面",
     "queued": "排队中", "validating": "检查素材", "preparing_voice": "生成旁白",
-    "animating_presenter": "制作人物口型", "planning_visuals": "编排画面",
+    "transcribing": "识别原声", "planning_visuals": "编排画面",
+    "animating_presenter": "制作人物口型",
     "compositing": "合成视频", "checking": "检查成片", "ready": "制作完成", "failed": "需要处理",
     "withdrawn": "已撤回",
 }
 STAGE_MESSAGES = {
+    "planning_story":"正在结合素材与品牌知识编排故事", "captioning":"正在识别成片语音并制作字幕",
+    "planning_supplement": "正在起草片尾衔接内容", "generating_visuals": "正在生成补充画面",
     "queued": "任务已加入队列", "validating": "正在分析原始素材",
+    "transcribing": "正在识别素材中的原声内容",
     "preparing_voice": "正在按已确认讲稿生成完整旁白", "animating_presenter": "正在同步人物嘴型",
     "planning_visuals": "正在按完整旁白时长编排画面", "compositing": "正在合成画面、字幕和声音",
     "checking": "正在检查成片音画与完整解码", "ready": "成片检查通过，等待人工试看确认",
@@ -24,7 +30,7 @@ STAGE_MESSAGES = {
 _MESSAGE_STAGES = {message: stage for stage, message in STAGE_MESSAGES.items()}
 _MESSAGE_STAGES.update({"用户请求重新剪辑，已排队": "queued", "服务重新启动，已重新排队恢复剪辑": "queued",
                         "分析完成，开始渲染和成片检查": "compositing", "成片检查未通过，禁止发布": "failed"})
-_ACTIVE_STAGES = {"validating", "preparing_voice", "animating_presenter", "planning_visuals", "compositing", "checking"}
+_ACTIVE_STAGES = {"transcribing", "planning_story", "captioning","planning_supplement", "generating_visuals","validating", "preparing_voice", "animating_presenter", "planning_visuals", "compositing", "checking"}
 _DONE_STATUSES = {"review", "approved", "publishing", "published"}
 
 
@@ -81,8 +87,23 @@ def progress_snapshot(job, events, queue_position=None, current_time=None):
     production = job.get("production") or {}
     mode = job.get("mode") or creation.get("mode") or production.get("mode") or "edit"
     narrated = mode in {"talking_head", "narrated_promo", "brand_promo"}
-    ids = (["validating", "preparing_voice"] + (["animating_presenter"] if mode == "talking_head" else [])
-           + ["planning_visuals", "compositing", "checking"] if narrated else ["validating", "compositing", "checking"])
+    vlog = mode == "vlog"
+    if mode=="story":
+        ids=(["validating","compositing","checking"] if creation.get('assembly_plan_id') else
+             ["validating","transcribing","preparing_voice","planning_visuals","compositing","checking"] if creation.get('spoken_script') else
+             ["validating","transcribing","planning_story","preparing_voice","planning_visuals","compositing","checking"])
+    elif vlog:
+        opts = creation.get("options") or {}
+        ids = ["validating", "planning_visuals"]
+        if opts.get("allow_supplemental_visuals") or opts.get("allow_generated_dialogue"):ids += ["planning_supplement"]
+        if opts.get("allow_supplemental_visuals"):ids += ["generating_visuals"]
+        if opts.get("allow_generated_dialogue"):ids += ["preparing_voice"]
+        ids += ["compositing", "checking"]
+    else:
+        ids = (["validating", "preparing_voice"] + (["animating_presenter"] if mode == "talking_head" else [])
+               + ["planning_visuals", "compositing", "checking"] if narrated else ["validating", "compositing", "checking"])
+    if mode in {"edit","vlog"} and (creation.get("options") or {}).get("subtitles"):
+        ids.insert(ids.index("checking"),"captioning")
     labels = dict(STAGE_LABELS)
     if not narrated:
         labels.update(validating="分析素材", compositing="渲染画面")
@@ -162,7 +183,7 @@ def progress_snapshot(job, events, queue_position=None, current_time=None):
         if error:
             detail += " " + error
     else:
-        detail = STAGE_MESSAGES[stage] + "；阶段数量不代表预计耗时百分比。"
+        detail = ("正在按所选素材顺序编排画面" if vlog and stage == 'planning_visuals' else STAGE_MESSAGES[stage]) + "；阶段数量不代表预计耗时百分比。"
     elapsed, stage_elapsed = _seconds(attempt_start, end), _seconds(stage_start, end)
     return {"stage": stage, "label": labels[stage], "detail": detail, "stages": stages,
             "completed_count": completed, "total_count": len(ids), "elapsed_seconds": elapsed,

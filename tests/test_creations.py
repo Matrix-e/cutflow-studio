@@ -102,7 +102,7 @@ class CreationAPITests(unittest.TestCase):
         self.assertIn('不支持', job['creation_warnings'][0])
         persisted = Store(self.root / 'data' / 'studio.sqlite3').get(job['id'])
         creation = persisted['settings']['creation']
-        self.assertEqual(creation['options'], options)
+        self.assertEqual(creation['options'], {**options, 'subtitles': False})
         self.assertEqual(creation['version'], 1)
         for entry in creation['sources']:
             stat = (self.inbox / entry['source']).stat()

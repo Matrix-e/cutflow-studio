@@ -86,6 +86,19 @@ class LocalGatewayTests(unittest.TestCase):
         self.context.__exit__(None,None,None)
         self.temp.cleanup()
 
+    def test_director_media_cookie_only_allows_bounded_read_routes(self):
+        self.client.get('/local-session',headers=self.session_headers)
+        self.response_mode='range'
+        for suffix in ('video','artifacts/cover','artifacts/subtitles','artifacts/record','artifacts/package'):
+            with self.subTest(suffix=suffix):
+                result=self.client.get('/api/productions/abc-123/'+suffix,headers={'Range':'bytes=0-3'})
+                self.assertEqual(result.status_code,206)
+                self.assertEqual(result.content,b'clip')
+                self.assertEqual(self.calls[-1]['headers']['authorization'],'Bearer '+self.GPU_TOKEN)
+        self.assert_rejected_without_upstream('GET','/api/productions/abc-123')
+        self.assert_rejected_without_upstream('POST','/api/productions/abc-123/retry')
+        self.assert_rejected_without_upstream('GET','/api/productions/abc-123/artifacts/secrets')
+
     def assert_rejected_without_upstream(self,method,path,headers=None,**kwargs):
         previous = len(self.calls)
         response = self.client.request(method,path,headers=headers,**kwargs)
@@ -337,7 +350,7 @@ class LocalGatewayTests(unittest.TestCase):
         self.assertNotIn('sensitive upstream',str(raised.exception))
         self.assertIn('stage=video_stream retrying=False',' '.join(logs.output))
 
-    def test_only_portrait_import_has_eight_mib_body_limit_and_long_single_attempt(self):
+    def test_portrait_import_has_eight_mib_body_limit_and_long_single_attempt(self):
         payload = b'image-bytes' * 7000
         self.assert_rejected_without_upstream('POST', '/api/ideas', headers=self.auth, content=payload)
         response = self.client.post('/api/presenters/import?filename=person.png', headers={**self.auth,
@@ -354,6 +367,56 @@ class LocalGatewayTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(len(self.calls), 1)
         self.assertFalse(response.json()['retryable'])
+
+    def test_screenshot_upload_forwards_large_body_and_rejects_over_eight_mib(self):
+        path = '/api/brand-context/screenshots?name=dashboard&request_id=00112233-4455-6677-8899-aabbccddeeff'
+        for size in (65537, 8 * 1024 * 1024):
+            payload = b'x' * size
+            response = self.client.post(path, headers={**self.auth, 'Content-Type': 'image/png'}, content=payload)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(self.calls[-1]['body'], payload)
+            self.assertEqual(self.calls[-1]['headers']['content-type'], 'image/png')
+            self.assertEqual(self.calls[-1]['timeout']['read'], 60)
+            self.assertIn('request_id=00112233-4455-6677-8899-aabbccddeeff', self.calls[-1]['url'])
+        response = self.assert_rejected_without_upstream('POST', path, headers=self.auth,
+                                                         content=b'x' * (8 * 1024 * 1024 + 1))
+        self.assertEqual(response.status_code, 413)
+
+    def test_only_exact_screenshot_post_receives_larger_limit_and_single_attempt(self):
+        for method, path in [('PUT', '/api/brand-context/screenshots'),
+                             ('POST', '/api/brand-context/screenshots/extra'),
+                             ('POST', '/api/brand-context')]:
+            self.assert_rejected_without_upstream(method, path, headers=self.auth, content=b'x' * 65537)
+        self.failures = [httpx.ReadTimeout('private upload detail ' + self.GPU_TOKEN)]
+        with self.assertLogs('cutflow.local_gateway', level='WARNING'):
+            response = self.client.post('/api/brand-context/screenshots', headers=self.auth, content=b'image')
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]['timeout']['read'], 60)
+        self.assertFalse(response.json()['retryable'])
+        self.assertNotIn(self.GPU_TOKEN, response.text)
+
+    def test_screenshot_get_requires_bearer_and_never_forwards_browser_token(self):
+        path = '/api/brand-context/screenshots/' + 'a' * 32
+        self.client.get('/local-session', headers=self.session_headers)
+        self.assert_rejected_without_upstream('GET', path, headers={'Sec-Fetch-Site': 'same-origin'})
+        self.assert_rejected_without_upstream('GET', path + '?token=' + self.LOCAL_TOKEN,
+                                             headers={'Sec-Fetch-Site': 'same-origin'})
+        self.assert_rejected_without_upstream('GET', path,
+                                             headers={**self.auth, 'Origin': 'https://untrusted.example'})
+        response = self.client.get(path + '?token=' + self.LOCAL_TOKEN, headers=self.auth)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.calls[-1]['headers']['authorization'], 'Bearer ' + self.GPU_TOKEN)
+        self.assertNotIn(self.LOCAL_TOKEN, self.calls[-1]['url'])
+        self.assertNotIn('cookie', self.calls[-1]['headers'])
+        for token in (self.GPU_TOKEN, self.LOCAL_TOKEN):
+            self.assertNotIn(token, response.text)
+            self.assertNotIn(token, str(response.headers))
+        self.response_mode = 'server_error'
+        with self.assertLogs('cutflow.local_gateway', level='WARNING'):
+            response = self.client.get(path, headers=self.auth)
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn(self.GPU_TOKEN, response.text)
 
     def test_media_cookie_allows_only_exact_portrait_image_get(self):
         self.client.get('/local-session', headers=self.session_headers)

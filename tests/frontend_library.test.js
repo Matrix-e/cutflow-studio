@@ -38,8 +38,10 @@ function setup() {
     'productionAspect','productionDuration','productionMusic','productionSubtitles','productionLoop',
     'productionSourceAudio','productionBrand','productionDate','productionPlace','productionCTA','productionOpeningTitle'];
   const checks = new Set(['productionMusic','productionSubtitles','productionLoop']);
+  const creatorFields=['creatorBrief','creatorTitle','creatorDuration','creatorAspect','creatorPace','creatorOriginalAudio','creatorMusic','creatorOpeningTitle','creatorSubtitles'];
   const context = vm.createContext({
-    console, production, creator, state, productionFields:fields, productionChecks:checks,
+    console, production, creator, state, productionFields:fields, productionChecks:checks,creatorFields,
+    setDraftFieldValue:(id,value)=>{elements.get(id).value=String(value);},
     $:selector => elements.get(selector.slice(1)),
     document:{addEventListener(){},querySelectorAll(selector){
       if (selector === '.learn-fields input') return learn;
@@ -112,6 +114,25 @@ test('a video submission begun during variant loading is never replaced', async 
   response.resolve(draft('A'));await loading;
   assert.equal(h.app.knowledgeUI.variant,null);
   assert.equal(h.elements.get('variantDialog').open,false);assert.equal(h.saved.length,0);
+});
+
+test('story work restores subtitle preference and supplemental choices without changing mode',async()=>{
+  const h=setup(),data=draft('A');data.draft.mode='story';data.draft.options.subtitles=false;
+  data.draft.options.allow_supplemental_visuals=true;data.draft.options.allow_generated_dialogue=false;
+  await h.app.applyWorkDraft(data,'remix');
+  assert.equal(h.production.mode,'story');
+  assert.equal(h.elements.get('creatorSubtitles').checked,false);
+  assert.equal(h.elements.get('productionSubtitles').checked,false);
+  assert.equal(h.elements.get('productionSupplementVisuals').checked,true);
+  assert.equal(h.elements.get('productionGeneratedDialogue').checked,false);
+});
+
+test('changing subtitle preference while a variant loads retains the current draft',async()=>{
+  const h=setup(),response=deferred();h.apiImpl=()=>response.promise;
+  const loading=h.app.prepareWorkVariant('A','presenter');h.elements.get('creatorSubtitles').checked=true;
+  response.resolve(draft('A'));await loading;
+  assert.equal(h.production.parentId,null);
+  assert.equal(h.elements.get('creatorSubtitles').checked,true);
 });
 
 test('annotation conflict keeps user input and only rebases after explicit action', async () => {

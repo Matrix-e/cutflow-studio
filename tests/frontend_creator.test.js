@@ -35,9 +35,11 @@ function setup({localPage = true, storage = new Map()} = {}) {
     click() { if (!this.disabled) return this.onclick?.(); }
   }
   for (const [, id] of html.matchAll(/id="([^"]+)"/g)) elements.set(id, new Element(id));
+  elements.get('creatorSubtitles').checked=true;
+  for(const id of ['creatorSearchStatus','creatorSearchMore'])elements.set(id,new Element(id));
   const state = {connected: true, assets: [], jobs: [], config: {creation_supported: true},
     token: 'PRIVATE-DESKTOP-TOKEN', gpuToken: 'PRIVATE-GPU-TOKEN', base: 'http://127.0.0.1:8767'};
-  const localImports = {items: [], maxBytes: 2 * 1024**3};
+  const localImports = {token:state.token,items: [], maxBytes: 2 * 1024**3};
   const h = {elements, listeners, state, localImports, storage, apiCalls: [], uploadCalls: [],
     refreshCalls: 0, libraryRefreshCalls: 0, pages: [], available: true, storageReads: 0, storageWrites: 0};
   h.apiImpl = async () => ({job: {id: 'created-job', title: 'Generated', status: 'queued'}, created: true});
@@ -57,7 +59,7 @@ function setup({localPage = true, storage = new Map()} = {}) {
     }
   };
   const context = vm.createContext({
-    document, localPage, localStorage: {
+    document, localPage, setTimeout, clearTimeout, assetCatalogUsable:()=>state.connected,assetCatalogCurrent:()=>state.connected,localStorage: {
       getItem(key) { h.storageReads++; return storage.get(key) || null; },
       setItem(key, value) { h.storageWrites++; storage.set(key, value); }
     }, state, localImports, console,
@@ -75,6 +77,7 @@ function setup({localPage = true, storage = new Map()} = {}) {
     api: async (route, options) => { h.apiCalls.push({route, options, body: JSON.parse(options.body)}); return h.apiImpl(route, options); },
     uploadLocalFile: async (item, mode, id, progress) => { h.uploadCalls.push({file: item, mode, id}); return h.uploadImpl(item, mode, id, progress); }
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/asset-browser.js'),'utf8'),context);
   vm.runInContext(source + '\nglobalThis.creatorApp={creator,creatorFields,creatorPool,creatorSelection,toggleCreatorMaterial,renderCreatorMaterials,updateCreatorAccess,creatorOptions,uploadCreatorFiles,retryCreatorUpload,generateCreation,saveCreatorDraft,loadCreatorDraft};', context);
   h.app = context.creatorApp;
   h.dispatch = (eventName, dataset, extra = {}) => {
@@ -193,7 +196,7 @@ test('default generation sends ordered sources and brief without overriding opti
   assert.equal(call.route, '/api/creations'); assert.equal(call.options.method, 'POST');
   assert.deepEqual(call.body.sources, ['b.mp4', 'a.mp4']);
   assert.equal(call.body.brief, '做一条30秒竖屏视频，保留原声。');
-  assert.deepEqual(call.body.options, {});
+  assert.deepEqual(call.body.options, {subtitles:true});
   assert.equal(call.body.title, ''); assert.ok(call.body.idempotency_key);
   assert.deepEqual(Object.keys(call.body).sort(), ['brief', 'idempotency_key', 'options', 'sources', 'title']);
 });
@@ -205,7 +208,7 @@ test('explicit options keep numeric and false values instead of inferred default
   for (const [id, value] of Object.entries(values)) h.field(id, value);
   await h.app.generateCreation();
   assert.equal(h.apiCalls[0].body.title, '实际作品');
-  assert.deepEqual(h.apiCalls[0].body.options, {target_duration: 30, aspect: '9:16', pace: 'preserve',
+  assert.deepEqual(h.apiCalls[0].body.options, {subtitles:true,target_duration: 30, aspect: '9:16', pace: 'preserve',
     keep_original_audio: false, music: false, opening_title: '开头标题'});
 });
 
@@ -250,7 +253,7 @@ test('draft persists only local creation fields and never connection credentials
   await h.app.generateCreation();
   const raw = [...h.storage.values()][0], draft = JSON.parse(raw);
   for (const secret of ['PRIVATE-DESKTOP-TOKEN', 'PRIVATE-GPU-TOKEN', 'PRIVATE-WEBHOOK', 'PRIVATE-FILE-CONTENTS']) assert.ok(!raw.includes(secret));
-  assert.deepEqual(Object.keys(draft).sort(), ['fields', 'requestBody', 'requestId', 'resultId', 'selected', 'uncertain']);
+  assert.deepEqual(Object.keys(draft).sort(), ['assetLabels', 'fields', 'requestBody', 'requestId', 'resultId', 'selected', 'uncertain']);
   assert.deepEqual(Object.keys(draft.fields).sort(), plain(h.app.creatorFields).sort());
   const cloud = setup({localPage: false}); cloud.ready(); cloud.app.saveCreatorDraft();
   assert.equal(cloud.storageReads, 0); assert.equal(cloud.storageWrites, 0); assert.equal(cloud.storage.size, 0);
@@ -312,4 +315,11 @@ test('uncertain state still allows reconciliation and unlocks inputs after confi
   assert.equal(h.elements.get('creatorClearSelection').disabled, false);
   h.app.toggleCreatorMaterial('s:b.mp4', true);
   assert.deepEqual(plain(h.app.creator.selected), ['s:a.mp4', 's:b.mp4']);
+});
+
+
+test('edit subtitle switch is sent and restored as a boolean',async()=>{
+ const h=setup();h.ready();h.elements.get('creatorSubtitles').checked=false;h.app.saveCreatorDraft();
+ await h.app.generateCreation();assert.equal(h.apiCalls[0].body.options.subtitles,false);
+ const restored=setup({storage:h.storage});assert.equal(restored.elements.get('creatorSubtitles').checked,false);
 });

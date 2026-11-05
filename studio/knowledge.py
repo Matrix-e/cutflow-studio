@@ -177,7 +177,7 @@ class KnowledgeStore:
         if not isinstance(duration, (int, float)) or isinstance(duration, bool) or not math.isfinite(duration) or duration <= 0:
             duration = None
         snapshot = {'schema_version': VERSION, 'job_id': identifier, 'title': _text(job.get('title'), 160),
-            'brief': _text(creation.get('brief'), 3000), 'spoken_script': _text(creation.get('spoken_script'), 1600),
+            'brief': _text(creation.get('brief'), 3000), 'spoken_script': _text(creation.get('spoken_script') or ((job.get('plan') or {}).get('spoken_script') if creation.get('mode') == 'story' else ''), 1600),
             'mode': _text(creation.get('mode', 'edit'), 40), 'subtype': _text(creation.get('subtype'), 40),
             'voice_id': _text(creation.get('voice_id'), 120), 'brand': brand, 'options': options,
             'duration': duration, 'visual_fill': _text(creation.get('visual_fill'), 20),

@@ -40,6 +40,23 @@ DEFAULTS = {
 # a concat script. These formats cover the local-container inputs in the API.
 INPUT_OPTIONS = ["-protocol_whitelist", "file", "-format_whitelist", "mov,matroska,webm,avi,mpegts"]
 
+# Same linear-light BT.2020 -> Hable -> BT.709 workflow already used by the
+# bounded automatic-assembly and Vlog renderers. This transforms sample values;
+# replacing HDR labels with SDR labels without this filter is never sufficient.
+HDR_TO_SDR_FILTER = ('zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,'
+                     'tonemap=hable:desat=2,zscale=t=bt709:m=bt709:r=tv,format=yuv420p')
+
+
+def _hdr_workflow(info: dict) -> dict | None:
+    if info.get('color_transfer') not in ('smpte2084','arib-std-b67'):
+        return None
+    if info.get('color_primaries') != 'bt2020' or info.get('color_space') not in ('bt2020nc','bt2020c'):
+        raise MediaError('HDR color metadata is incomplete or unsupported; BT.2020 primaries and matrix are required for controlled SDR conversion')
+    return {'applied':True,'method':'linear-light Hable tone mapping',
+            'input':{key:info.get(key) for key in ('color_transfer','color_primaries','color_space')},
+            'output':{'color_transfer':'bt709','color_primaries':'bt709','color_space':'bt709','color_range':'tv'},
+            'nominal_peak_luminance':100,'filter':HDR_TO_SDR_FILTER}
+
 
 def _run(args: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
     try:
@@ -135,7 +152,7 @@ def inspect_media(path: str | Path) -> dict:
         "audio_sample_rate": int(a.get("sample_rate", 0)) if a else None,
         "audio_channels": a.get("channels") if a else None,
         "color_transfer": v.get("color_transfer"), "color_primaries": v.get("color_primaries"),
-        "color_space": v.get("color_space"), "field_order": v.get("field_order"),
+        "color_space": v.get("color_space"), "color_range": v.get("color_range"), "field_order": v.get("field_order"),
         "format": raw.get("format", {}).get("format_name"),
     }
 
@@ -238,7 +255,7 @@ def build_plan(path: str | Path, settings: dict | None = None) -> dict:
     if not info["has_audio"]:
         warnings.append("素材没有音轨：保留全部画面，不执行语音停顿剪辑。")
     if info["color_transfer"] in ("smpte2084", "arib-std-b67"):
-        warnings.append("检测到 HDR 素材；当前版本需要先做受控 SDR 转换，禁止直接改色彩标签。")
+        warnings.append("检测到 HDR 素材；导出将先在线性光空间进行色调映射，再转为 SDR BT.709，不直接替换色彩标签。")
     if info["field_order"] not in (None, "unknown", "progressive"):
         warnings.append("检测到隔行素材；请先转为逐行扫描以保证运动画面质量。")
     analysis = _analyze_audio(info["path"], info, cfg) if cfg["remove_silence"] or cfg["normalize_audio"] else {"silences": [], "peak_db": None}
@@ -340,6 +357,10 @@ def _check_output(path: Path, plan: dict, width: int, height: int) -> dict:
         checks.append({"name": "audio_format", "passed": info["audio_codec"] == "aac" and info["audio_sample_rate"] == 48000})
         checks.append({"name": "audio_video_duration", "passed": abs(info["audio_duration"] - info["duration"]) <= tolerance + 0.1,
                        "audio": info["audio_duration"], "video": info["duration"]})
+    if plan.get('color_workflow',{}).get('applied'):
+        expected={'color_transfer':'bt709','color_primaries':'bt709','color_space':'bt709','color_range':'tv'}
+        checks.append({'name':'hdr_to_sdr_color','passed':all(info.get(key)==value for key,value in expected.items()),
+                       'expected':expected,'actual':{key:info.get(key) for key in expected}})
     try:
         _run([_tool("ffmpeg"), "-hide_banner", "-nostdin", "-v", "error", "-xerror",
               *INPUT_OPTIONS, "-i", str(path), "-f", "null", "-"], max(180, info["duration"] * 3))
@@ -354,7 +375,8 @@ def render_plan(plan: dict, output_path: str | Path, settings: dict | None = Non
     """Render the explicit edit list to H.264/AAC and fully decode for validation.
 
     NVENC is opt-in and tested before use; otherwise libx264 CRF 18 is the default.
-    SDR inputs are fit inside the frame without cropping people or product detail.
+    Inputs are fit inside the frame without cropping people or product detail.
+    Tagged BT.2020 PQ/HLG sources are tone-mapped before any geometry conversion.
     Supplied subtitles are retimed into an SRT sidecar, never invented or burnt in.
     """
     cfg = _settings({**plan.get("settings", {}), **(settings or {})})
@@ -368,8 +390,7 @@ def render_plan(plan: dict, output_path: str | Path, settings: dict | None = Non
     if any(prior_info.get(key) is not None and prior_info[key] != fresh[key]
            for key in ("size_bytes", "modified_ns")):
         raise MediaError("Source changed after planning; rebuild the edit plan")
-    if fresh["color_transfer"] in ("smpte2084", "arib-std-b67"):
-        raise MediaError("HDR-to-SDR conversion requires an explicit validated color workflow; this source is not rendered")
+    color_workflow = _hdr_workflow(fresh)
     if fresh["field_order"] not in (None, "unknown", "progressive"):
         raise MediaError("Interlaced video needs a validated deinterlacing pass before editing")
     if not plan.get("clips") or len(plan["clips"]) > 500:
@@ -377,6 +398,7 @@ def render_plan(plan: dict, output_path: str | Path, settings: dict | None = Non
     clips = _frame_clips([[clip["source_in"], clip["source_out"]] for clip in plan["clips"]], fresh["duration"], cfg["fps"])
     clock = clips[-1]["timeline_end"]
     active_plan = {**plan, "clips": clips, "duration": clock, "source_info": fresh, "settings": cfg}
+    if color_workflow:active_plan['color_workflow']=color_workflow
     subtitle_text = None
     if cfg.get("srt_path"):
         subtitle_source = Path(cfg["srt_path"]).resolve()
@@ -411,7 +433,8 @@ def render_plan(plan: dict, output_path: str | Path, settings: dict | None = Non
         graph.append(f"[0:a:0]asetpts=PTS-STARTPTS{alignment},aresample=48000,aformat=channel_layouts=stereo,apad=whole_dur={fresh['duration']:.6f},asplit={n}" + "".join(f"[a{i}]" for i in range(n)))
     for i, clip in enumerate(clips):
         start, end = clip["source_in"], clip["source_out"]
-        graph.append(f"[v{i}]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS,scale=trunc(iw*sar/2)*2:ih,setsar=1,scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps={cfg['fps']},tpad=stop_mode=clone:stop_duration=1,trim=end_frame={clip['frames']},format=yuv420p[vc{i}]")
+        color_filter = HDR_TO_SDR_FILTER + ',' if color_workflow else ''
+        graph.append(f"[v{i}]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS,{color_filter}scale=trunc(iw*sar/2)*2:ih,setsar=1,scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps={cfg['fps']},tpad=stop_mode=clone:stop_duration=1,trim=end_frame={clip['frames']},format=yuv420p[vc{i}]")
         if has_audio:
             graph.append(f"[a{i}]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS,apad=whole_dur={clip['duration']:.6f},atrim=duration={clip['duration']:.6f}[ac{i}]")
     labels = "".join(f"[vc{i}]" + (f"[ac{i}]" if has_audio else "") for i in range(n))
@@ -435,6 +458,8 @@ def render_plan(plan: dict, output_path: str | Path, settings: dict | None = Non
             args += ["-map", "[audio]", "-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
         args += ["-c:v", encoder]
         args += ["-preset", "p6", "-cq", str(int(cfg["crf"])), "-b:v", "0"] if encoder == "h264_nvenc" else ["-preset", "medium", "-crf", str(int(cfg["crf"])), "-threads", "4"]
+        if color_workflow:
+            args += ['-color_primaries','bt709','-color_trc','bt709','-colorspace','bt709','-color_range','tv']
         args += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", "-map_metadata", "-1", str(staged)]
         _run(args, max(300, fresh["duration"] * 10))
         qc = _check_output(staged, active_plan, width, height)
@@ -443,6 +468,7 @@ def render_plan(plan: dict, output_path: str | Path, settings: dict | None = Non
     report = {"output_path": str(destination), "duration": metadata["duration"],
               "rendered_clips": clips,
               "encoder": encoder, "metadata": metadata, "qc": qc, "warnings": warnings}
+    if color_workflow:report['color_workflow']=color_workflow
     if subtitle_text is not None:
         sidecar = destination.with_suffix(".srt")
         sidecar.write_text(subtitle_text, encoding="utf-8")

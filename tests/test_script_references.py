@@ -153,15 +153,16 @@ class ReferenceAPITests(unittest.TestCase):
         self.assertEqual(self.create(rewrite_source_id=self.original_id).status_code, 400)
         self.assertIsNone(self.worker.store.get(self.id))
 
-    def test_old_provider_signature_receives_no_unrequested_new_keywords(self):
+    def test_provider_receives_frozen_brand_context_with_no_unrequested_reference_keywords(self):
         calls = []
-        def old_generate(brief, source_names, *, mode, brand, subtype, target_duration, stop_event):
-            calls.append(brief)
+        def old_generate(brief, source_names, *, mode, brand, subtype, target_duration, stop_event, brand_context):
+            calls.append((brief,brand_context))
             return draft()
         self.provider.generate_script = old_generate
         self.create()
         self.process()
         self.assertEqual(len(calls), 1)
+        self.assertIn('confirmed_facts',calls[0][1])
         self.assertEqual(self.worker.store.get(self.id)['status'], 'succeeded')
 
 

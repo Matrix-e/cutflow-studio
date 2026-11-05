@@ -12,8 +12,9 @@
 .production-progress-description{font-size:12px;line-height:1.8;color:#647267;margin:10px 0;overflow-wrap:anywhere}
 .production-progress-facts{display:flex;flex-wrap:wrap;gap:8px 22px;font-size:11px;color:#748173;margin:12px 0}
 .production-progress-facts b{color:#3e5848;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
-.production-progress-steps{list-style:none;padding:14px 0 0;margin:14px 0 0;border-top:1px solid #e5eae0;display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:12px}
+.production-progress-steps{list-style:none;padding:14px 0 0;margin:14px 0 0;border-top:1px solid #e5eae0;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,120px),1fr));gap:14px 12px}
 .production-progress-step{display:flex;align-items:flex-start;gap:8px;font-size:11px;line-height:1.5;color:#7c857b;min-width:0}
+.production-progress-step>span:last-child{flex:1;min-width:0;word-break:normal;overflow-wrap:break-word}
 .production-progress-step small{font-size:10px;font-weight:400;margin-top:2px;color:#8a9386}
 .production-progress-marker{flex:0 0 22px;height:22px;border-radius:50%;display:grid;place-items:center;background:#eef1e9;color:#87917c;font-size:10px;font-weight:600}
 .production-progress-step.completed{color:#567049}
@@ -25,4 +26,4 @@
 .production-progress-error,.production-progress-offline{font-size:11px;line-height:1.8;margin:12px 0 0;padding:9px 12px;border-radius:6px;overflow-wrap:anywhere}
 .production-progress-error{background:#fae8e1;color:#9e4e37}
 .production-progress-offline{background:#f5f0e2;color:#866d36}
-@media(max-width:600px){.production-progress-card{padding:15px}.production-progress-heading{align-items:flex-start;gap:10px}.production-progress-heading .button{font-size:11px;padding:8px 10px}.production-progress-heading h3{font-size:13px}.production-progress-steps{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 10px}.production-progress-facts{gap:7px 14px}}
+@media(max-width:600px){.production-progress-card{padding:15px}.production-progress-heading{align-items:flex-start;gap:10px}.production-progress-heading .button{font-size:11px;padding:8px 10px}.production-progress-heading h3{font-size:13px}.production-progress-steps{gap:14px 10px}.production-progress-facts{gap:7px 14px}}

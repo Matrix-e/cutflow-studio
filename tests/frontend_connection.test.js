@@ -53,6 +53,19 @@ test('review detail 503 immediately invalidates green, retains cached data, disa
   assert.match(h.elements.get('desktopConnectionStatus').innerHTML,/连接方式：本地自动连接/);
   assert.match(h.elements.get('desktopConnectionStatus').innerHTML,/GPU 连接异常/);
 });
+test('review list displays friendly source names without mutating stored paths or titles',async()=>{
+  const h=await setup();h.configure();
+  const original='工作台导入/library/10000000-0000-4000-8000-000000000001/video(2)--cc2517da0a7082df.mp4';
+  h.app.state.jobs=[{id:'j1',title:'走访主题',source:original,status:'review',created_at:'2026-11-04T12:00:00Z',has_video:true}];
+  h.app.renderJobs();
+  for(const id of ['jobsList','recentJobs']){const html=h.elements.get(id).innerHTML;assert.match(html,/走访主题/);assert.match(html,/video\(2\)\.mp4/);assert.match(html,/11\/04/);assert.doesNotMatch(html,/工作台导入|library\/|cc2517da0a7082df|10000000-0000/);}
+  assert.equal(h.app.state.jobs[0].source,original);assert.equal(h.app.state.jobs[0].title,'走访主题');
+});
+test('friendly review source keeps portrait mode and escapes display-only names',async()=>{
+  const h=await setup();h.configure();h.app.state.jobs=[{id:'j1',title:'口播',source:'portrait:private-portrait-id',status:'review'},
+    {id:'j2',title:'现场',source:'library\\private-folder\\<现场>--abcdef0123456789.mp4',status:'review'}];h.app.renderJobs();
+  const html=h.elements.get('jobsList').innerHTML;assert.match(html,/人物口播 · 自选形象/);assert.match(html,/&lt;现场&gt;\.mp4/);assert.doesNotMatch(html,/private-portrait-id|private-folder|abcdef0123456789|<现场>/);
+});
 
 test('video fetch uses central failure handling',async()=>{
   const h=await setup();h.configure();h.fetchImpl=async url=>url.endsWith('/video')?result({detail:'成片读取暂不可用'},503):result({job:{id:'j1',title:'Review',status:'review',has_video:true,video_url:'/api/jobs/j1/video',plan:{duration:3,clips:[]}}});

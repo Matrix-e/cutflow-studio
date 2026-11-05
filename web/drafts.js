@@ -8,9 +8,10 @@ const workDrafts = (() => {
   const productionLimits = {productionSubtype:80,productionScript:1600,productionVoice:160,
     productionStyle:80,productionAspect:80,productionDuration:80,productionSourceAudio:80,
     productionBrand:120,productionDate:80,productionPlace:160,productionCTA:240,productionOpeningTitle:160};
-  const checkFields = ['productionMusic','productionSubtitles','productionLoop'];
-  const modes = new Set(['edit','talking_head','narrated_promo','brand_promo']);
-  const labels = {edit:'原声剪辑',talking_head:'人物口播',narrated_promo:'独白宣传',brand_promo:'企业／沙龙宣传'};
+  const checkFields = ['productionMusic','productionSubtitles','productionLoop','productionSupplementVisuals','productionGeneratedDialogue'];
+  const creatorChecks = ['creatorSubtitles'];
+  const modes = new Set(['edit','vlog','story','talking_head','narrated_promo','brand_promo']);
+  const labels = {story:'知识故事片',vlog:'原声 Vlog',edit:'原声剪辑',talking_head:'人物口播',narrated_promo:'独白宣传',brand_promo:'企业／沙龙宣传'};
   let dialog, list, status, search, archived, savePanel, nameInput, summary;
   const available = () => typeof localPage !== 'undefined' && localPage &&
     ['localhost','127.0.0.1','[::1]','::1'].includes(location.hostname);
@@ -30,6 +31,10 @@ const workDrafts = (() => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw error('这份草稿内容不完整，未覆盖当前内容。');
     const source = value.creator || {}, p = value.production || {}, creatorValues = {}, productionValues = {};
     for (const [id, max] of Object.entries(creatorLimits)) creatorValues[id] = text(source.fields?.[id], max);
+    for (const id of creatorChecks) {
+      if(source.fields?.[id]!=null&&typeof source.fields[id]!=='boolean')throw error('草稿的字幕选项格式无效。');
+      creatorValues[id]=source.fields?.[id]!==false;
+    }
     for (const [id, max] of Object.entries(productionLimits)) productionValues[id] = text(p.fields?.[id], max);
     for (const id of checkFields) {
       if (p.fields?.[id] != null && typeof p.fields[id] !== 'boolean') throw error('草稿的选项格式无效。');
@@ -61,6 +66,7 @@ const workDrafts = (() => {
   function capture() {
     const c = {}, p = {};
     for (const id of Object.keys(creatorLimits)) c[id] = field(id)?.value || '';
+    for (const id of creatorChecks) c[id] = field(id)?.checked !== false;
     for (const id of Object.keys(productionLimits)) p[id] = field(id)?.value || '';
     for (const id of checkFields) p[id] = field(id)?.checked === true;
     const assetLabels = typeof creatorAssetLabels === 'function' ? creatorAssetLabels() : (creator.assetLabels || {});
@@ -159,7 +165,7 @@ const workDrafts = (() => {
     creator.requestId=null;creator.requestBody=null;creator.resultId=null;creator.uncertain=false;
     creator.selected=[...snapshot.creator.selected];
     creator.assetLabels={...snapshot.creator.assetLabels};
-    for(const [id,value] of Object.entries(snapshot.creator.fields))if(field(id))setDraftFieldValue(id,value);
+    for(const [id,value] of Object.entries(snapshot.creator.fields))if(field(id)){if(creatorChecks.includes(id))field(id).checked=value;else setDraftFieldValue(id,value);}
     const p=snapshot.production;
     for(const key of ['mode','kind','portraitId','preferredVoice','voiceExplicit','parentId','parentTitle','revisionKind'])production[key]=p[key];
     production.referenceIds=[...p.referenceIds];
@@ -172,6 +178,7 @@ const workDrafts = (() => {
     if(typeof knowledgeUI!=='undefined'){knowledgeUI.variant=null;knowledgeUI.variantRequest++;}
     document.querySelectorAll('[data-presenter-kind]').forEach(e=>e.classList.toggle('active',e.dataset.presenterKind===production.kind));
     saveCreatorDraft();saveProductionDraft();
+    if(typeof setDirectorActive==='function')setDirectorActive(false);
     dialog.close();showPage('create');renderCreatorMaterials();renderWorkContext();
     if(typeof renderPresenterCatalog==='function')renderPresenterCatalog();
     updateProductionAccess();renderCreatorResult();

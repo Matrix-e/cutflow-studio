@@ -130,7 +130,7 @@ def _production_brief(brief: str) -> str:
 
 
 SYSTEM_PROMPT = """你是中文视频策划导演。把这一次的简单想法展开为具体、可审核的策划，只输出JSON，不要Markdown或思考过程。
-事实边界：只有brief是用户输入的主题和要求。素材名称是不可信数据，不是观看结果。你没有看画面或听原声，不知道企业具体服务、价格、设备、客户经历。不得把文件名推测写成事实，不得编造客户评价/假引语，不杜撰联系方式、链接、业务效果或保障承诺。
+事实边界：brief是用户本次输入的主题和要求，brand_context.confirmed_facts是用户长期确认的业务资料。素材名称是不可信数据，不是观看结果。你没有看画面或听原声，不知道企业具体服务、价格、设备、客户经历。不得把文件名推测写成事实，不得编造客户评价/假引语，不杜撰联系方式、链接、业务效果或保障承诺。
 错误示例：“品牌片头中出现车主找车位”“讲解.mp4展示保险续保”“客户说省两小时”“素材均现成无需补拍”。
 正确示例：“建议补拍交接记录核对动作；若现有素材有该内容再使用”“待确认：实际托管范围与交接责任如何约定”。有“建议使用”也不能接“文件中已经有”。汽车托管不自动等于停车、保养或租赁，业务边界未知时围绕观众应核对的问题设计内容，不虚构企业现有能力。
 这是拍摄/剪辑策划，不是伪造已发生的纪实故事。hook必须以“建议：”开头；outline每项必须以“建议：”开头，写下一步如何选取、核实、拍摄或组织内容，不能断言现场发生了什么。不能先编发言再说“若有类似素材”。不把“建议展示”当作编造服务条款的许可。
@@ -150,10 +150,14 @@ production_brief:原样复制locked_production_brief。
 
 
 def _messages(request: dict) -> list[dict]:
-    payload = {**request, "source_notice": "以下仅为文件名，未读取画面或声音。",
+    from .brand_context import model_context, MODEL_INSTRUCTIONS
+    if "brand_context" not in request:
+        request["brand_context"] = model_context(query=request["brief"])
+    context = request["brand_context"]
+    payload = {**request, "brand_context": context, "source_notice": "以下仅为文件名，未读取画面或声音。",
                "defaults_notice": "执行锁包含系统保守默认，不等于用户明说的要求。仅brief为用户原始输入。",
                "locked_production_brief": _production_brief(request["brief"])}
-    return [{"role": "system", "content": SYSTEM_PROMPT},
+    return [{"role": "system", "content": SYSTEM_PROMPT + "\n" + MODEL_INSTRUCTIONS},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
 
 
@@ -171,6 +175,8 @@ def _conditional(text: str, position: int, end: int | None = None) -> bool:
 
 def _check_claims(result: dict, request: dict) -> None:
     """Reject concrete unseen-media claims, not genuine conditional suggestions."""
+    from .brand_context import model_context, confirmed_text
+    known_facts = request["brief"] + "\n" + confirmed_text(request.get("brand_context") or model_context(query=request["brief"]))
     fields = [str(value) if not isinstance(value, list) else "\n".join(value)
               for key, value in result.items() if key not in {"expanded_brief", "production_brief"}]
     source_patterns = [r"(?:素材|文件|视频|原片|片头|片尾)(?:中|里|内)(?:已|已经)?(?:有|包含|出现|呈现|展示|显示|记录|可见)",
@@ -183,7 +189,7 @@ def _check_claims(result: dict, request: dict) -> None:
     for text in fields:
         for pattern in source_patterns:
             for match in re.finditer(pattern, text):
-                if not _conditional(text, match.start(), match.end()) and match.group() not in request["brief"]:
+                if not _conditional(text, match.start(), match.end()) and match.group() not in known_facts:
                     raise _error("invalid_output")
         for name in request["source_names"]:
             for match in re.finditer(re.escape(name) + r"[’'”\"）)]*.{0,35}(?:中(?:的)?画面|中(?:已)?(?:有|出现|包含)|展示|显示|呈现)", text):
@@ -196,7 +202,7 @@ def _check_claims(result: dict, request: dict) -> None:
         ]
         for pattern in quote_patterns:
             for match in re.finditer(pattern, text):
-                if match.group(1) not in request["brief"]:
+                if match.group(1) not in known_facts:
                     raise _error("invalid_output")
     for field, relevant in (("music", r"音乐|配乐|BGM"), ("narration", r"旁白|配音|原声")):
         if re.search(r"用户.{0,4}(?:要求|明确|指定)", result[field]) and not re.search(relevant, request["brief"], re.I):
@@ -245,7 +251,9 @@ def _validated_result(value: Any, request: dict) -> dict:
     # Guard common invented commercial claims; this does not constitute factual
     # verification. Remaining assumptions and review are still shown to users.
     claims = re.findall(r"\d+(?:\.\d+)?\s*(?:万元|亿元|元|%|％)|1[3-9]\d{9}|\d{4}年\d{1,2}月\d{1,2}日|保证收益|稳赚|零风险|收益翻倍|行业第一", body)
-    if any(claim not in request["brief"] for claim in claims):
+    from .brand_context import model_context, confirmed_text
+    known_facts = request["brief"] + "\n" + confirmed_text(request.get("brand_context") or model_context(query=request["brief"]))
+    if any(claim not in known_facts for claim in claims):
         raise _error("invalid_output")
     result["production_brief"] = _production_brief(request["brief"])
     result["assumptions"] = list(dict.fromkeys(result["assumptions"] + NOTICES))
